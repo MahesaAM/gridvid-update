@@ -95,6 +95,10 @@ function setupAutoUpdater() {
         if (mainWindow) mainWindow.webContents.send('update-available', info);
     });
 
+    autoUpdater.on('update-not-available', (info) => {
+        if (mainWindow) mainWindow.webContents.send('update-not-available', info);
+    });
+
     autoUpdater.on('update-downloaded', (info) => {
         if (mainWindow) mainWindow.webContents.send('update-downloaded', info);
     });
@@ -120,7 +124,15 @@ ipcMain.on('install-update', () => {
 });
 
 ipcMain.on('check-for-update', () => {
-    autoUpdater.checkForUpdates();
+    console.log('[Main] Manual check for updates triggered...');
+    autoUpdater.checkForUpdates().then((res) => {
+        console.log('[Main] Check for updates promise resolved:', res);
+        // If res is null/undefined in some cases, we might need to handle it, 
+        // but usually events fire.
+    }).catch(err => {
+        console.error('[Main] Check for updates failed:', err);
+        if (mainWindow) mainWindow.webContents.send('update-error', err.toString());
+    });
 });
 
 

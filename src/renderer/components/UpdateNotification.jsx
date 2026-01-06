@@ -1,48 +1,77 @@
 import React, { useState, useEffect } from 'react';
 
-const UpdateNotification = () => {
+const UpdateNotification = ({ isManualCheck, onCheckComplete }) => {
     const [updateAvailable, setUpdateAvailable] = useState(false);
     const [updateInfo, setUpdateInfo] = useState(null);
     const [downloading, setDownloading] = useState(false);
     const [downloadProgress, setDownloadProgress] = useState(0);
     const [downloaded, setDownloaded] = useState(false);
     const [error, setError] = useState(null);
+    const [upToDate, setUpToDate] = useState(false);
 
     useEffect(() => {
         if (!window.api) return;
 
         // Listen for update-available
-        window.api.receive('update-available', (info) => {
+        const removeAvailable = window.api.receive('update-available', (info) => {
             console.log('Update available:', info);
             setUpdateAvailable(true);
             setUpdateInfo(info);
-            // Default behavior is auto-download, but we reset error
             setError(null);
             setDownloading(true);
+            setUpToDate(false);
+            if (onCheckComplete) onCheckComplete();
+        });
+
+        // Listen for update-not-available
+        const removeNotAvailable = window.api.receive('update-not-available', (info) => {
+            console.log('Update not available:', info);
+            if (isManualCheck) {
+                setUpToDate(true);
+                setUpdateInfo(info); // Might contain current version info
+                // Auto hide after 3 seconds
+                setTimeout(() => {
+                    setUpToDate(false);
+                }, 3000);
+            }
+            if (onCheckComplete) onCheckComplete();
         });
 
         // Listen for download progress
-        window.api.receive('download-progress', (progressObj) => {
-            // progressObj usually has { percent, transferred, total, bytesPerSecond, delta, ... }
+        const removeProgress = window.api.receive('download-progress', (progressObj) => {
             if (progressObj && progressObj.percent) {
                 setDownloadProgress(progressObj.percent);
             }
         });
 
         // Listen for update-downloaded
-        window.api.receive('update-downloaded', (info) => {
+        const removeDownloaded = window.api.receive('update-downloaded', (info) => {
             console.log('Update downloaded:', info);
             setDownloading(false);
             setDownloaded(true);
         });
 
         // Listen for errors
-        window.api.receive('update-error', (err) => {
+        const removeError = window.api.receive('update-error', (err) => {
             console.error('Update error:', err);
-            setError(err);
-            setDownloading(false); // Stop showing progress bar
+            // Only show error if manual check or if we were downloading
+            if (isManualCheck || downloading) {
+                setError(err);
+            }
+            setDownloading(false);
+            if (onCheckComplete) onCheckComplete();
         });
-    }, []);
+
+        // Note: window.api.receive in preload typically adds a listener. 
+        // If it returns a cleanup function, we should use it. 
+        // Based on typical implementation in this project context (from common patterns), 
+        // it might not return cleanup. If so, we risk duplicate listeners if component remounts.
+        // Assuming App.jsx renders this once and keeps it mounted.
+
+        return () => {
+            // Cleanup if the bridge supports it, otherwise do nothing
+        };
+    }, [isManualCheck, onCheckComplete, downloading]);
 
     const handleInstall = () => {
         window.api.send('install-update');
@@ -52,6 +81,29 @@ const UpdateNotification = () => {
         setUpdateAvailable(false);
         setError(null);
     };
+
+    // Up to date toast/modal
+    if (upToDate) {
+        return (
+            <div className="fixed inset-0 flex items-center justify-center bg-black/50 z-50 backdrop-blur-sm animate-in fade-in duration-200">
+                <div className="bg-slate-900 border border-slate-700/50 rounded-xl p-6 shadow-2xl max-w-sm w-full ring-1 ring-white/10 flex flex-col items-center text-center">
+                    <div className="w-12 h-12 bg-green-500/10 rounded-full flex items-center justify-center mb-4 text-green-400">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                    </div>
+                    <h2 className="text-lg font-bold text-white mb-1">You're all set!</h2>
+                    <p className="text-slate-400 text-sm mb-4">You are using the latest version of GridVid.</p>
+                    <button
+                        onClick={() => setUpToDate(false)}
+                        className="px-6 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition-colors text-sm"
+                    >
+                        Close
+                    </button>
+                </div>
+            </div>
+        )
+    }
 
     if (!updateAvailable) return null;
 

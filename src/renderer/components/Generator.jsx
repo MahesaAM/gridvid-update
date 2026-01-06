@@ -195,6 +195,8 @@ export default function Generator({ mode, logs, isHeadless }) {
             };
             reader.readAsText(file);
         }
+        // Reset value to allow selecting same file again
+        e.target.value = '';
     };
 
     const getDurationDisplay = (index) => {

@@ -27,6 +27,7 @@ export default function App() {
     const [isAuthChecking, setIsAuthChecking] = useState(true);
     const [appVersion, setAppVersion] = useState('v1.0.0');
     const [expirationDate, setExpirationDate] = useState(null);
+    const [checkingUpdate, setCheckingUpdate] = useState(false);
 
     useEffect(() => {
         const validateSession = async () => {
@@ -177,7 +178,7 @@ export default function App() {
                     <div className="flex items-center gap-4">
                         {isAuthenticated && (
                             <>
-                                <label className="flex items-center gap-2 cursor-pointer group">
+                                <label className="flex items-center gap-2 cursor-pointer group hidden">
                                     <span className={cn("text-[10px] font-medium transition-colors", isHeadless ? "text-blue-400" : "text-slate-500")}>
                                         Headless
                                     </span>
@@ -199,12 +200,19 @@ export default function App() {
                         )}
                         <div className="flex items-center gap-2 bg-slate-900/50 px-3 py-1 rounded-full border border-white/5">
                             <div className="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse"></div>
-                            <span className="text-[10px] text-slate-400 font-mono">GRIDVID REBORN</span>
+                            <span className="text-[10px] text-slate-400 font-mono">GRIDVID</span>
                             <span className="text-[9px] text-slate-600 font-mono ml-1">{appVersion}</span>
                             <button
-                                onClick={() => window.api.send('check-for-update')}
-                                className="ml-2 text-slate-500 hover:text-white transition-colors p-1 rounded-full hover:bg-white/10"
+                                onClick={() => {
+                                    setCheckingUpdate(true);
+                                    window.api.send('check-for-update');
+                                }}
+                                className={cn(
+                                    "ml-2 text-slate-500 transition-colors p-1 rounded-full hover:bg-white/10",
+                                    checkingUpdate ? "text-blue-400 animate-spin" : "hover:text-white"
+                                )}
                                 title="Check for Updates"
+                                disabled={checkingUpdate}
                             >
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -258,7 +266,15 @@ export default function App() {
 
                     {!isAuthenticated ? (
                         <div className="h-full flex items-center justify-center">
-                            <Login onLoginSuccess={() => setIsAuthenticated(true)} />
+                            <Login onLoginSuccess={(session) => {
+                                setIsAuthenticated(true);
+                                if (session && session.expired) {
+                                    const d = new Date(session.expired);
+                                    setExpirationDate(d.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }));
+                                } else {
+                                    setExpirationDate('Lifetime');
+                                }
+                            }} />
                         </div>
                     ) : (
                         <>
@@ -273,7 +289,10 @@ export default function App() {
                 </div>
             </div>
 
-            <UpdateNotification />
+            <UpdateNotification
+                isManualCheck={checkingUpdate}
+                onCheckComplete={() => setCheckingUpdate(false)}
+            />
         </div >
     );
 }
