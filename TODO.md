@@ -1,0 +1,2 @@
+- [x] Update `src/automation/chromium-utils.js` to change the target directory for Windows from 'browsers_win' to 'puppeteer-chromium'.
+- [x] Run `verify-chrome-path.js` to confirm the change resolves to the local path.

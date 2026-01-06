@@ -1,0 +1,615 @@
+const fs = require('fs');
+const path = require('path');
+const { getOpalFrame } = require('./common-utils');
+
+// robust-get-auth-token logic adapted from user's script
+async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@diigimon.com", accountPassword = "Genshin123") {
+    logCallback("Starting robust token capture...");
+
+    let authToken = null;
+
+    // Disable cache to ensure we see the network requests
+    try {
+        await page.setCacheEnabled(false);
+        const client = await page.target().createCDPSession();
+        await client.send('Network.setCacheDisabled', { cacheDisabled: true });
+    } catch (e) {
+        logCallback(`Warning: Failed to disable cache: ${e.message}`);
+    }
+
+    await page.setRequestInterception(true);
+
+    const requestHandler = (request) => {
+        const headers = request.headers();
+        const authHeader = Object.keys(headers).find(k => k.toLowerCase() === 'authorization');
+
+        if (authHeader) {
+            const tokenValue = headers[authHeader];
+            if (tokenValue && tokenValue.startsWith('Bearer ')) {
+                if (!authToken) {
+                    authToken = tokenValue;
+                    logCallback("\n>>> TOKEN FOUND! <<<");
+                }
+            }
+        }
+        request.continue();
+    };
+
+    page.on('request', requestHandler);
+
+    logCallback("Reloading/Navigating to https://google.com ...");
+
+    // Optimization: Promise that resolves as soon as token is found
+    const tokenFoundPromise = new Promise(resolve => {
+        const checkInterval = setInterval(() => {
+            if (authToken) {
+                clearInterval(checkInterval);
+                resolve(authToken);
+            }
+        }, 100);
+        // Timeout this promise after 25s
+        setTimeout(() => { clearInterval(checkInterval); resolve(null); }, 25000);
+    });
+
+    try {
+        // Race navigation against token finding
+        const navigatePromise = page.goto('https://opal.google', { waitUntil: 'domcontentloaded' });
+        await Promise.race([navigatePromise, tokenFoundPromise]);
+    } catch (e) {
+        logCallback(`Navigation error (or ignored): ${e.message}`);
+    }
+
+    // Immediate Probe
+    if (!authToken) {
+        logCallback("Initial nav done. Probing...");
+        try {
+            await page.evaluate(() => {
+                fetch("https://appcatalyst.pa.googleapis.com/v1beta1/mobile_service:execute", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ dummy: true })
+                }).catch(() => { });
+            });
+        } catch (e) { }
+    }
+
+    // Brief stabilization
+    if (!authToken) await new Promise(r => setTimeout(r, 1500));
+
+    if (authToken) return authToken;
+
+    logCallback("Token not found immediately. checking for sign in...");
+
+    try {
+        // Find & Click Sign In
+        const performClick = async () => {
+            try {
+                const emailSelector = 'input[type="email"]';
+                if (await page.$(emailSelector)) return null;
+
+                const frameElement = await page.$('#opal-app');
+                let frame = null;
+                if (frameElement) {
+                    logCallback("Found #opal-app iframe. Checking inside...");
+                    frame = await frameElement.contentFrame();
+                }
+
+                const searchAndClick = async (scope, scopeName) => {
+                    const loginButton = await scope.$('a[href*="accounts.google.com"]');
+                    if (loginButton) {
+                        logCallback(`Found Sign In button (href) in ${scopeName}. Clicking...`);
+                        await loginButton.click();
+                        return true;
+                    }
+                    const buttons = await scope.$$('button, a');
+                    for (const btn of buttons) {
+                        const t = await scope.evaluate(el => (el.textContent || el.innerText || "").trim().toLowerCase(), btn);
+                        if (t === "sign in" || t === "log in") {
+                            logCallback(`Found Sign In button ("${t}") in ${scopeName}. Clicking...`);
+                            try { await btn.click(); } catch (e) { await scope.evaluate(el => el.click(), btn); }
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                let clicked = await searchAndClick(page, "main page");
+                if (!clicked && frame) clicked = await searchAndClick(frame, "iframe");
+                return clicked;
+            } catch (e) {
+                logCallback("Error finding sign in button: " + e.message);
+            }
+        };
+
+        const clicked = await performClick();
+        let loginPage = page;
+
+        if (clicked) {
+            logCallback("Sign in clicked. Waiting for popup or navigation...");
+            await new Promise(r => setTimeout(r, 1000));
+            try {
+                const newTarget = await page.browser().waitForTarget(target => target.opener() === page.target(), { timeout: 10000 });
+                if (newTarget) {
+                    logCallback(">>> POPUP DETECTED! Switching context <<<");
+                    loginPage = await newTarget.page();
+                    if (!loginPage) {
+                        await new Promise(r => setTimeout(r, 1000));
+                        loginPage = await newTarget.page();
+                    }
+                }
+            } catch (e) {
+                logCallback("No new target/popup detected. Assuming same-page.");
+            }
+
+            if (loginPage && loginPage !== page) {
+                await loginPage.waitForNetworkIdle({ timeout: 10000 }).catch(() => { });
+                await loginPage.setRequestInterception(true);
+                loginPage.on('request', requestHandler);
+            }
+        }
+
+        // --- ACCOUNT SELECTION ---
+        try {
+            await new Promise(r => setTimeout(r, 1500));
+            const chooseAccountHeader = await loginPage.evaluate(() => {
+                const h1 = document.querySelector('h1, h2, div[role="heading"]');
+                return h1 ? h1.innerText : "";
+            });
+
+            if (chooseAccountHeader.toLowerCase().includes("choose an account") || chooseAccountHeader.toLowerCase().includes("pilih akun")) {
+                logCallback("Detected 'Choose an account' screen.");
+                logCallback("User requested fresh login. Clicking 'Use another account'...");
+
+                const otherAccountBtn = await loginPage.evaluateHandle(() => {
+                    const items = Array.from(document.querySelectorAll('li, div[role="link"], span'));
+                    return items.find(i => i.innerText.toLowerCase().includes("use another account") || i.innerText.toLowerCase().includes("gunakan akun lain"));
+                });
+
+                if (otherAccountBtn.asElement()) {
+                    await otherAccountBtn.asElement().click();
+                    await new Promise(r => setTimeout(r, 2000));
+                } else {
+                    logCallback("Could not find 'Use another account' button.");
+                }
+            }
+        } catch (e) { }
+
+        // --- CREDENTIALS ENTRY ---
+        const emailSelector = 'input[type="email"]';
+        try {
+            await loginPage.waitForSelector(emailSelector, { visible: true, timeout: 5000 });
+            logCallback(`Auto-filling email: ${accountEmail}`);
+            await loginPage.type(emailSelector, accountEmail, { delay: 50 });
+            await new Promise(r => setTimeout(r, 500));
+            const nextButtonSelector = '#identifierNext button';
+            const nextBtn = await loginPage.$(nextButtonSelector);
+            if (nextBtn) await nextBtn.click();
+            else await loginPage.keyboard.press('Enter');
+        } catch (e) { }
+
+        const passwordSelector = 'input[type="password"]';
+        try {
+            await loginPage.waitForSelector(passwordSelector, { visible: true, timeout: 8000 });
+            await new Promise(r => setTimeout(r, 1000));
+            logCallback("Auto-filling password...");
+            await loginPage.type(passwordSelector, accountPassword, { delay: 50 });
+            await new Promise(r => setTimeout(r, 500));
+            const passwordNextSelector = '#passwordNext button';
+            const pwNextBtn = await loginPage.$(passwordNextSelector);
+            if (pwNextBtn) await pwNextBtn.click();
+            else await loginPage.keyboard.press('Enter');
+        } catch (e) { }
+
+        // Consent Loop
+        let consentClicks = 0;
+        try {
+            const startTime = Date.now();
+            while (Date.now() - startTime < 15000) {
+                if (loginPage.isClosed()) break;
+
+                const continueBtnHandle = await loginPage.evaluateHandle(() => {
+                    const buttons = Array.from(document.querySelectorAll('button, div[role="button"], span[role="button"], input[type="submit"]'));
+                    return buttons.find(b => {
+                        const t = (b.innerText || b.value || "").toLowerCase();
+                        if (t.includes("cancel") || t.includes("batal")) return false;
+                        return t === "continue" || t === "lanjutkan" || t === "next" ||
+                            t === "i agree" || t === "saya setuju" || t === "accept" || t === "allow" || t === "izinkan" ||
+                            t.includes("confirm") || t.includes("konfirmasi") ||
+                            t.includes("saya mengerti") || t.includes("i understand") || t.includes("mengerti");
+                    });
+                });
+
+                if (continueBtnHandle && continueBtnHandle.asElement()) {
+                    try {
+                        await loginPage.evaluate(el => el.click(), continueBtnHandle);
+                    } catch (errClick) {
+                        if (errClick.message.includes('Execution context was destroyed')) break;
+                    }
+
+                    consentClicks++;
+                    if (consentClicks > 5) break;
+                    await new Promise(r => setTimeout(r, 3000));
+                } else {
+                    await new Promise(r => setTimeout(r, 1000));
+                }
+            }
+        } catch (e) { }
+
+    } catch (e) {
+        logCallback("Auto-login logic error: " + e.message);
+    }
+
+    // Fallback Probe
+    if (!authToken) {
+        logCallback("Attempting aggressive fallback...");
+        try {
+            if (page.url().includes("opal.google")) {
+                // Relaxed wait condition to avoid timeout on slow network
+                await page.goto('https://opal.google', { waitUntil: 'domcontentloaded', timeout: 45000 });
+                await new Promise(r => setTimeout(r, 3000)); // Manual wait for scripts
+
+                // Probe again
+                if (!authToken) {
+                    try {
+                        await page.evaluate(() => {
+                            fetch("https://appcatalyst.pa.googleapis.com/v1beta1/mobile_service:execute", {
+                                method: "POST",
+                                headers: { "content-type": "application/json" },
+                                body: JSON.stringify({ dummy: true })
+                            }).catch(() => { });
+                        });
+                        await new Promise(r => setTimeout(r, 3000));
+                    } catch (e) { }
+                }
+            }
+        } catch (e) { }
+    }
+
+    logCallback("Waiting for token capture...");
+    const maxWaitTime = 60000;
+    const startTime = Date.now();
+    while (!authToken) {
+        if (Date.now() - startTime > maxWaitTime) {
+            // Check FOR BLOCKS before throwing timeout
+            try {
+                const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
+                if (pageText.includes("verify it's you") || pageText.includes("verifikasi diri anda")) {
+                    throw new Error("Account Blocked: 2FA/Verification required.");
+                } else if (pageText.includes("couldn't sign you in") || pageText.includes("tidak dapat login")) {
+                    throw new Error("Account Blocked: Sign-in rejected.");
+                }
+            } catch (e) {
+                if (e.message.includes("Account Blocked")) throw e;
+            }
+            throw new Error("Auth Timeout: Could not capture token in time.");
+        }
+        await new Promise(r => setTimeout(r, 1000));
+        // Periodic probe
+        if ((Date.now() - startTime) % 5000 < 1000 && !authToken) {
+            try {
+                await page.evaluate(() => {
+                    fetch("https://appcatalyst.pa.googleapis.com/v1beta1/mobile_service:execute", {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ dummy: true })
+                    }).catch(() => { });
+                });
+            } catch (e) { }
+        }
+    }
+
+    return authToken;
+}
+
+async function generateImagePrompt(authToken, imagePath, logCallback) {
+    const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+    logCallback("Generating image prompt via Gemini 2.5 Flash...");
+
+    try {
+        const imageBuffer = fs.readFileSync(imagePath);
+        const imageBase64 = imageBuffer.toString('base64');
+        // Simple MIME type detection
+        const ext = path.extname(imagePath).toLowerCase();
+        const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+
+        const payload = {
+            "contents": [{
+                "parts": [
+                    {
+                        "text": "You are an expert in visual storytelling and prompt engineering for video generation. Your task is to refine user-provided animation instructions into a detailed, descriptive, and natural language prompt for a GenAI video generation API, taking into account the content and context of an uploaded image. The generated prompt should describe a brief video clip, less than 6 seconds long, with no audio. The output should be a clear, detailed visual description of the video clip.\n# Step by Step instructions\n1. Analyze the Upload Image to understand its content and context.\n2. Read the Define Animation instructions provided by the user.\n3. Begin to refine the Define Animation instructions into a detailed, descriptive, and natural language prompt for video generation, taking into account the visual elements of the Upload Image.\n4. Review the prompt you have written so far. Does it clearly describe a brief video clip (less than 6 seconds long) with no audio, based on the Upload Image and Define Animation instructions? If not, go back to step 3 and continue refining the prompt, ensuring it is a clear and detailed visual description of the video clip. If yes, proceed to the next step.\n5. Finalize the prompt, ensuring it is a comprehensive and precise natural language description of the visual content of the brief video clip.\n\n\nUpload Image:\n\"\"\"\n"
+                    },
+                    {
+                        "inlineData": {
+                            "mimeType": mimeType,
+                            "data": imageBase64
+                        }
+                    }
+                ]
+            }]
+        };
+
+        // Note: The HAR likely used specific headers or keys. 
+        // We will try using the same Auth Token as it acts as a user on opal.google.
+        // If this fails, we might need to look for an API key in the HAR headers.
+        const headers = {
+            "content-type": "application/json",
+            "origin": "https://opal.google",
+            "referer": "https://opal.google/",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+            "authorization": authToken,
+            // Header often needed for Google APIs proxying
+            "x-goog-user-project": "opal-app"
+        };
+
+        const response = await fetch(endpoint, {
+            method: "POST",
+            headers: headers,
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Gemini API Error ${response.status}: ${errorText}`);
+        }
+
+        const data = await response.json();
+
+        // Parse Gemini response
+        if (data.candidates && data.candidates.length > 0 && data.candidates[0].content && data.candidates[0].content.parts.length > 0) {
+            const generatedText = data.candidates[0].content.parts[0].text;
+            logCallback("Gemini Prompt Generated: " + generatedText.substring(0, 100) + "...");
+            return generatedText;
+        } else {
+            throw new Error("Unexpected Gemini response structure.");
+        }
+
+    } catch (error) {
+        logCallback("Error generating image prompt: " + error.message);
+        throw error;
+    }
+}
+
+async function generateVideoAPI(authToken, prompt, aspectRatio, logCallback, imagePath = null, duration = null) {
+    const endpoint = "https://appcatalyst.pa.googleapis.com/v1beta1/executeStep";
+    const finalPrompt = prompt || "A realistic video";
+    const finalRatio = aspectRatio || "16:9";
+    const finalDuration = duration ? duration.replace('s', '') : "8";
+
+
+
+    logCallback(`Generatng video via API...`);
+    if (imagePath) logCallback(`Using image input: ${imagePath}`);
+    logCallback(`Duration: ${finalDuration}s`);
+
+    let generatedPrompt = finalPrompt;
+
+    // STEP 1: If Image is present, use Gemini to generate the prompt
+    if (imagePath && fs.existsSync(imagePath)) {
+        try {
+            // We append the user's prompt to the "Define Animation instructions" part of the system prompt if we wanted to be dynamic,
+            // but the HAR hardcoded the system prompt.
+            // For now, we'll let generateImagePrompt handle the image-to-text. 
+            // The HAR "text" field ends with "Upload Image:\n\"\"\"\n". 
+            // It seems the user's instruction in the HAR was implicit or part of the "text" block if there was any.
+            // The logic below assumes we strictly follow the image-to-video flow.
+
+            const geminiText = await generateImagePrompt(authToken, imagePath, logCallback);
+            generatedPrompt = geminiText; // Use the generated text as the main prompt
+
+            logCallback(`Using Gemini Text for Video Gen: ${generatedPrompt}`);
+
+        } catch (e) {
+            logCallback(`Gemini generation failed, falling back to original prompt: ${e.message}`);
+        }
+    }
+
+    const augmentedPrompt = `${generatedPrompt} --aspect_ratio ${finalRatio} --duration ${finalDuration}`;
+    logCallback(`Sent Prompt: ${augmentedPrompt}`);
+
+    const promptBase64 = Buffer.from(augmentedPrompt).toString('base64');
+    const aspectRatioBase64 = Buffer.from(finalRatio).toString('base64');
+    const durationBase64 = Buffer.from(finalDuration).toString('base64');
+
+    const executionInputs = {
+        text_instruction: { chunks: [{ mimetype: "text/plain", data: promptBase64 }] },
+        aspect_ratio_key: { chunks: [{ mimetype: "text/plain", data: aspectRatioBase64 }] },
+        duration_key: { chunks: [{ mimetype: "text/plain", data: durationBase64 }] }
+    };
+
+    // NOTE: We are intentionally NOT adding 'image_prompt' here anymore based on the new flow 
+    // where we convert Image -> Text (Gemini) -> Video (Veo). 
+    // If the user wanted the image to be *visually* influenced directly by Veo (e.g. style transfer), 
+    // that would be a different payload. But "Image-to-Video" often means "Animate this image".
+    // Gemini 2.5 Flash is describing the image. 
+    // Wait, if we just describe the image, Veo generates a NEW video matching the description. 
+    // It doesn't animate the *original* pixels. 
+    // IF the goal is to ANIMATE the image (like Runway/Pika), passing the description alone is NOT enough 
+    // because Veo needs the source image pixels to keep consistency.
+    // However, the HAR file analysis revealed the Gemini call. 
+    // If the HAR *also* had an executeStep call with image_prompt, then we should do both.
+    // Since I didn't see the executeStep in the HAR snippet (it was huge/truncated), I am relying on the "Image to Text" finding.
+    // BUT, to be safe and powerful: if we have the image, we probably SHOULD send it if Veo supports it. 
+    // The previous implementation sent it. The "Fixing Image-to-Video Payload" conversation suggested sending it.
+    // Using Gemini description + Image bytes seems like the strongest combo for Veo if supported.
+    // Let's keep the image bytes in the payload IF we have them, ALONG WITH the enhanced prompt.
+
+    if (imagePath && fs.existsSync(imagePath)) {
+        try {
+            const imageBuffer = fs.readFileSync(imagePath);
+            const imageBase64 = imageBuffer.toString('base64');
+            const ext = path.extname(imagePath).toLowerCase();
+            const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+
+            executionInputs.reference_image = {
+                chunks: [{ mimetype: mimeType, data: imageBase64 }]
+            };
+            logCallback("Image encoded and added to payload (Native Image Support).");
+        } catch (e) {
+            logCallback(`Failed to read image file: ${e.message}`);
+        }
+    }
+
+    // HAR comparison shows 'veo-3.0-generate-preview' accepts 'reference_image' input.
+    const modelName = "veo-3.0-generate-preview";
+    logCallback(`Using Model: ${modelName}`);
+
+    const payload = {
+        planStep: {
+            stepName: "GenerateVideo",
+            modelApi: "generate_video",
+            inputParameters: ["text_instruction", "reference_image"],
+            systemPrompt: "",
+            output: "generated_video",
+            options: { disablePromptRewrite: false, modelName: modelName }
+        },
+        execution_inputs: executionInputs
+    };
+
+    const headers = {
+        "content-type": "application/json",
+        "origin": "https://opal.google",
+        "referer": "https://opal.google/",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+        "authorization": authToken
+    };
+
+    try {
+        const response = await fetch(endpoint, {
+            method: "POST",
+            headers: headers,
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`API Error ${response.status}: ${errorText}`);
+        }
+
+        const data = await response.json();
+
+        if (data.executionOutputs && data.executionOutputs.generated_video && data.executionOutputs.generated_video.chunks.length > 0) {
+            const chunkData = data.executionOutputs.generated_video.chunks[0].data;
+            const decodedPath = Buffer.from(chunkData, 'base64').toString('utf-8');
+            const parts = decodedPath.split('/');
+            const blobId = parts[parts.length - 1];
+            const downloadUrl = `https://opal.google/board/blobs/${blobId}`;
+
+            logCallback(`Video generated successfully!`);
+            return { downloadUrl, blobId };
+        } else {
+            // IMPROVED ERROR HANDLING
+            if (data.errorMessage) {
+                const errStr = typeof data.errorMessage === 'string' ? data.errorMessage : JSON.stringify(data.errorMessage);
+
+                if (errStr.includes("RESOURCE_EXHAUSTED") || errStr.includes("Quota exceeded")) {
+                    throw new Error("Quota Exceeded: Account reached daily limit.");
+                }
+
+                if (errStr.includes("sensitive words") || errStr.includes("INVALID_ARGUMENT") || errStr.includes("Responsible AI")) {
+                    throw new Error("Sensitive Content: Prompt violated safety policies.");
+                }
+            }
+
+            logCallback(`Debugging "No video data": Full Response = ${JSON.stringify(data).substring(0, 2000)}`);
+            throw new Error("No video data in response");
+        }
+    } catch (error) {
+        logCallback("API Execution error: " + error.message);
+        throw error;
+    }
+}
+
+let ffmpeg = null;
+let ffmpegPath = null;
+
+try {
+    ffmpeg = require('fluent-ffmpeg');
+    ffmpegPath = require('ffmpeg-static');
+    if (ffmpegPath && ffmpeg) {
+        ffmpeg.setFfmpegPath(ffmpegPath.replace('app.asar', 'app.asar.unpacked'));
+    }
+} catch (e) {
+    console.warn("ffmpeg dependencies not found. Audio stripping will be disabled.", e.message);
+}
+
+async function stripAudio(inputPath, logCallback) {
+    if (!ffmpeg) {
+        logCallback("Warning: ffmpeg not installed. Cannot strip audio. Output will contain audio.");
+        return inputPath;
+    }
+
+    return new Promise((resolve, reject) => {
+        const outputPath = inputPath.replace('.mp4', '_silent.mp4');
+        logCallback(`Stripping audio from: ${path.basename(inputPath)}...`);
+
+        ffmpeg(inputPath)
+            .outputOptions('-c copy')
+            .outputOptions('-an')
+            .save(outputPath)
+            .on('end', () => {
+                try {
+                    fs.unlinkSync(inputPath);
+                    fs.renameSync(outputPath, inputPath);
+                    logCallback("Audio removed successfully.");
+                    resolve(inputPath);
+                } catch (e) {
+                    reject(e);
+                }
+            })
+            .on('error', (err) => {
+                logCallback(`Error removing audio: ${err.message}`);
+                reject(err);
+            });
+    });
+}
+
+async function downloadVideoFile(url, authToken, savePath, filenameId, logCallback, muteAudio = false) {
+    if (!fs.existsSync(savePath)) {
+        fs.mkdirSync(savePath, { recursive: true });
+    }
+
+    const filePath = path.join(savePath, `veo_${filenameId}.mp4`);
+    logCallback(`Downloading to: ${filePath}...`);
+
+    const headers = {
+        "authorization": authToken,
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+    };
+
+    try {
+        const response = await fetch(url, { headers });
+        if (!response.ok) {
+            throw new Error(`Failed to download video: ${response.statusText}`);
+        }
+
+        const fileStream = fs.createWriteStream(filePath);
+
+        if (response.body) {
+            // @ts-ignore
+            for await (const chunk of response.body) {
+                fileStream.write(Buffer.from(chunk));
+            }
+        }
+
+        fileStream.end();
+
+        await new Promise(fulfill => fileStream.on("finish", fulfill));
+
+        logCallback("Download complete.");
+
+        if (muteAudio) {
+            try {
+                await stripAudio(filePath, logCallback);
+            } catch (e) {
+                logCallback(`Warning: Failed to strip audio: ${e.message}`);
+            }
+        }
+
+        return filePath;
+    } catch (error) {
+        logCallback("Error downloading: " + error.message);
+        throw error;
+    }
+}
+
+module.exports = { getAuthTokenFromPage, generateVideoAPI, downloadVideoFile };

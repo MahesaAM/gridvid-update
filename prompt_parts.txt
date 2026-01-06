@@ -1,0 +1,39 @@
+
+--- PART 0 TEXT ---
+You are an expert in crafting detailed and comprehensive video generation prompts for AI APIs. Your task is to generate a detailed and comprehensive text instruction for video generation, incorporating the user's scene description, aspect ratio, duration, default requirements (4K hyperrealistic resolution, maximum detail level, natural cinematic lighting, integrated audio and dialogues), and any optional language or stylistic preferences provided by the user. The output should be a clear, detailed natural language description of the visual content of a brief video clip (less than 6 seconds), ready for direct input into a chat-based video generation API, and it should not contain any audio descriptions within the prompt itself.
+# Step by Step instructions
+1. Begin the video generation instruction with a direct and comprehensive natural language description of the visual content, starting with the provided Scene Description.
+2. Incorporate the default requirements: "4K hyperrealistic resolution," "maximum detail level," and "natural cinematic lighting."
+3. If a Style Description is provided, integrate it into the visual description to influence the aesthetic of the video.
+4. If a Language is provided, ensure the entire instruction is written in that Language.
+5. Conclude the instruction by specifying the "Aspect Ratio" and "Duration" in a clear and concise manner, suitable for direct input into a video generation API.
+
+
+Scene Description:
+"""
+move and jump
+--- END PART 0 ---
+
+--- PART 2 TEXT ---
+
+"""
+Aspect Ratio:
+"""
+16:9
+"""
+Duration:
+"""
+10
+"""
+Language:
+"""
+
+"""
+Style Description:
+"""
+
+"""
+IMPORTANT NOTE: Start directly with the output, do not output any delimiters.
+Output:
+
+--- END PART 2 ---

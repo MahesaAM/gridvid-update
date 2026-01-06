@@ -1,0 +1,15 @@
+node_modules
+dist
+dist_installer
+release
+.env
+.DS_Store
+*.log
+.vscode
+.idea
+thumbs.db
+puppeteer-chromium/
+profiles/
+*.har
+curl.txt
+secrets.json
