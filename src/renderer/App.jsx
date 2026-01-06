@@ -203,7 +203,7 @@ export default function App() {
                             <span className="text-[9px] text-slate-600 font-mono ml-1">{appVersion}</span>
                             {isAuthenticated && expirationDate && (
                                 <span className="text-[9px] text-slate-500 font-mono ml-2 border-l border-white/10 pl-2">
-                                    EXP: {expirationDate}
+                                    EXPIRED: {expirationDate}
                                 </span>
                             )}
                         </div>
