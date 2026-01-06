@@ -103,7 +103,7 @@ export default function Generator({ mode, logs, isHeadless }) {
                     if (status === 'pending') {
                         // Start timer if not already started (or restart if needed, usually just start)
                         updates = { start: Date.now(), end: null };
-                    } else if (status === 'success' || status === 'error') {
+                    } else if (status === 'success' || status === 'error' || status === 'waiting') {
                         // End timer
                         updates = { ...currentTimer, end: Date.now() };
                     }
@@ -517,6 +517,7 @@ export default function Generator({ mode, logs, isHeadless }) {
                                         {getDurationDisplay(idx)}
                                         {status === 'success' && <div className="p-2 text-emerald-500 text-xs font-bold">Done</div>}
                                         {status === 'error' && <div className="p-2 text-red-500 text-xs font-bold">Failed</div>}
+                                        {status === 'waiting' && <div className="p-2 text-blue-400 text-xs font-bold animate-pulse">Waiting Token...</div>}
                                         {status === 'pending' && <div className="p-2 text-amber-500 text-xs font-bold">...</div>}
                                     </div>
                                 );

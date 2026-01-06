@@ -273,7 +273,8 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
 
                         // Handle Limits / Quota
                         if (errMsg.includes("429") || errMsg.includes("403") || errMsg.includes("limit") || errMsg.includes("quota") || errMsg.includes("Quota Exceeded")) {
-                            logCallback(`[${currentAccount.email}] 🛑 Limit Reached. Switching...`);
+                            logCallback(`[${currentAccount.email}] 🛑 Limit Reached. Waiting for token...`);
+                            statusCallback(currentItem.index, 'waiting'); // Notify UI to pause timer/show waiting
                             queue.unshift(currentItem); // Requeue item logic
                             accountStatus = 'limited';
                             break; // Break inner loop to release account

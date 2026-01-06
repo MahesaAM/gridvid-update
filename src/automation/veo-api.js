@@ -142,7 +142,7 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
             }
 
             if (loginPage && loginPage !== page) {
-                await loginPage.waitForNetworkIdle({ timeout: 10000 }).catch(() => { });
+                // Removed waitForNetworkIdle to attach interceptor immediately to avoid missing early requests
                 await loginPage.setRequestInterception(true);
                 loginPage.on('request', requestHandler);
             }
@@ -271,11 +271,46 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
     while (!authToken) {
         if (Date.now() - startTime > maxWaitTime) {
             // Check FOR BLOCKS before throwing timeout
+            // Check FOR BLOCKS
             try {
                 const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
-                if (pageText.includes("verify it's you") || pageText.includes("verifikasi diri anda")) {
-                    throw new Error("Account Blocked: 2FA/Verification required.");
-                } else if (pageText.includes("couldn't sign you in") || pageText.includes("tidak dapat login")) {
+
+                // 1. Phone Number Required (Hard Block)
+                if (pageText.includes("enter a phone number") || pageText.includes("masukkan nomor telepon") || pageText.includes("provide a phone number")) {
+                    throw new Error("Account Blocked: Phone verification required.");
+                }
+
+                // 2. "Verify it's you" (Soft Block -> Try Bypass)
+                if (pageText.includes("verify it's you") || pageText.includes("verify it’s you") || pageText.includes("verifikasi diri anda")) {
+                    logCallback("⚠️ 'Verify it's you' detected. Attempting 'Try another way'...");
+
+                    const tryAnotherWayClicked = await page.evaluate(() => {
+                        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], span'));
+                        const target = buttons.find(b => {
+                            const t = b.innerText.toLowerCase();
+                            return t.includes("try another way") || t.includes("coba cara lain") || t.includes("more options");
+                        });
+                        if (target) {
+                            target.click();
+                            return true;
+                        }
+                        return false;
+                    });
+
+                    if (tryAnotherWayClicked) {
+                        logCallback("Clicked 'Try another way'. Waiting...");
+                        await new Promise(r => setTimeout(r, 3000));
+                        // Loop will continue and check again. 
+                        // If it goes to email/tap yes, we might pass. 
+                        // If it goes back to phone, the first check above will catch it next loop.
+                        continue;
+                    } else {
+                        // No bypass button found
+                        throw new Error("Account Blocked: Verification required (No bypass).");
+                    }
+                }
+
+                if (pageText.includes("couldn't sign you in") || pageText.includes("tidak dapat login")) {
                     throw new Error("Account Blocked: Sign-in rejected.");
                 }
             } catch (e) {

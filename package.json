@@ -44,8 +44,8 @@
     "xlsx": "^0.18.5"
   },
   "build": {
-    "appId": "com.gridvid.app",
     "productName": "GridVid",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
     "compression": "store",
     "publish": [
       "github"
@@ -72,6 +72,7 @@
     "nsis": {
       "oneClick": false,
       "perMachine": true,
+      "guid": "GridVid-Reborn-Official-Unique-ID",
       "allowToChangeInstallationDirectory": true,
       "createStartMenuShortcut": true,
       "deleteAppDataOnUninstall": true

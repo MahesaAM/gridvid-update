@@ -115,7 +115,12 @@ app.whenReady().then(() => {
 });
 
 ipcMain.on('install-update', () => {
-    autoUpdater.quitAndInstall();
+    // Silent install (no wizard), force run after
+    autoUpdater.quitAndInstall(true, true);
+});
+
+ipcMain.on('check-for-update', () => {
+    autoUpdater.checkForUpdates();
 });
 
 
