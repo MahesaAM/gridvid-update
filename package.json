@@ -1,6 +1,6 @@
 {
   "name": "gridvid",
-  "version": "3.3.6",
+  "version": "3.3.7",
   "description": "Browser automation bot with React UI",
   "main": "src/main/main.js",
   "scripts": {
