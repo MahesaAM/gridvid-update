@@ -1,6 +1,6 @@
 {
   "name": "gridvid",
-  "version": "3.3.3",
+  "version": "3.3.4",
   "description": "Browser automation bot with React UI",
   "main": "src/main/main.js",
   "scripts": {
@@ -46,6 +46,7 @@
   "build": {
     "appId": "com.gridvid.app",
     "productName": "GridVid",
+    "compression": "store",
     "publish": [
       "github"
     ],
@@ -72,8 +73,8 @@
       "oneClick": false,
       "perMachine": true,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": true
     }
   }
 }

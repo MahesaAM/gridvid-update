@@ -6,6 +6,7 @@ const UpdateNotification = () => {
     const [downloading, setDownloading] = useState(false);
     const [downloadProgress, setDownloadProgress] = useState(0);
     const [downloaded, setDownloaded] = useState(false);
+    const [error, setError] = useState(null);
 
     useEffect(() => {
         if (!window.api) return;
@@ -15,7 +16,8 @@ const UpdateNotification = () => {
             console.log('Update available:', info);
             setUpdateAvailable(true);
             setUpdateInfo(info);
-            // Auto-updater usually starts downloading automatically unless configured otherwise
+            // Default behavior is auto-download, but we reset error
+            setError(null);
             setDownloading(true);
         });
 
@@ -34,10 +36,11 @@ const UpdateNotification = () => {
             setDownloaded(true);
         });
 
-        // Listen for errors (optional, to hide modal or show error)
+        // Listen for errors
         window.api.receive('update-error', (err) => {
             console.error('Update error:', err);
-            // Optionally hide or show error
+            setError(err);
+            setDownloading(false); // Stop showing progress bar
         });
     }, []);
 
@@ -47,6 +50,7 @@ const UpdateNotification = () => {
 
     const handleLater = () => {
         setUpdateAvailable(false);
+        setError(null);
     };
 
     if (!updateAvailable) return null;
@@ -66,30 +70,39 @@ const UpdateNotification = () => {
                     </div>
                 </div>
 
-                <div className="bg-slate-950/50 rounded-lg p-4 mb-6 ring-1 ring-white/5 space-y-3">
-                    <div className="flex justify-between items-center text-sm">
-                        <span className="text-slate-500">Current Version</span>
-                        <span className="font-mono text-slate-300">v{updateInfo?.currentVersion || '...'}</span>
+                {error ? (
+                    <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-6 text-sm text-red-200">
+                        <p className="font-bold text-red-400 mb-1">Download Failed</p>
+                        <p className="opacity-90">{error.toString()}</p>
                     </div>
-                    <div className="flex justify-between items-center text-sm">
-                        <span className="text-slate-500">New Version</span>
-                        <span className="font-mono text-green-400 font-bold">v{updateInfo?.version}</span>
-                    </div>
-                </div>
+                ) : (
+                    <>
+                        <div className="bg-slate-950/50 rounded-lg p-4 mb-6 ring-1 ring-white/5 space-y-3">
+                            <div className="flex justify-between items-center text-sm">
+                                <span className="text-slate-500">Current Version</span>
+                                <span className="font-mono text-slate-300">v{updateInfo?.currentVersion || '...'}</span>
+                            </div>
+                            <div className="flex justify-between items-center text-sm">
+                                <span className="text-slate-500">New Version</span>
+                                <span className="font-mono text-green-400 font-bold">v{updateInfo?.version}</span>
+                            </div>
+                        </div>
 
-                {downloading && !downloaded && (
-                    <div className="mb-6 space-y-2">
-                        <div className="flex justify-between text-xs text-slate-400">
-                            <span>Downloading...</span>
-                            <span>{Math.round(downloadProgress)}%</span>
-                        </div>
-                        <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
-                            <div
-                                className="h-full bg-indigo-500 transition-all duration-300 ease-out"
-                                style={{ width: `${downloadProgress}%` }}
-                            />
-                        </div>
-                    </div>
+                        {downloading && !downloaded && (
+                            <div className="mb-6 space-y-2">
+                                <div className="flex justify-between text-xs text-slate-400">
+                                    <span>Downloading...</span>
+                                    <span>{Math.round(downloadProgress)}%</span>
+                                </div>
+                                <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                                    <div
+                                        className="h-full bg-indigo-500 transition-all duration-300 ease-out"
+                                        style={{ width: `${downloadProgress}%` }}
+                                    />
+                                </div>
+                            </div>
+                        )}
+                    </>
                 )}
 
                 <div className="flex gap-3">

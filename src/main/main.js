@@ -83,6 +83,8 @@ app.on('window-all-closed', () => {
 function setupAutoUpdater() {
     autoUpdater.logger = require("electron-log");
     autoUpdater.logger.transports.file.level = "info";
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
 
     // Check for updates and notify
     autoUpdater.checkForUpdatesAndNotify();
@@ -102,6 +104,7 @@ function setupAutoUpdater() {
     });
 
     autoUpdater.on('error', (err) => {
+        console.error('AutoUpdater Error:', err);
         if (mainWindow) mainWindow.webContents.send('update-error', err.toString());
     });
 }
