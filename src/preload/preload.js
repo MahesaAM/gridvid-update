@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('api', {
         }
     },
     receive: (channel, func) => {
-        let validChannels = ['log-update', 'automation-status', 'accounts-data', 'item-status', 'account-update', 'update-available', 'update-downloaded', 'update-error'];
+        let validChannels = ['log-update', 'automation-status', 'accounts-data', 'item-status', 'account-update', 'update-available', 'update-downloaded', 'update-error', 'download-progress'];
         if (validChannels.includes(channel)) {
             // Deliberately strip event as it includes `sender` 
             ipcRenderer.on(channel, (event, ...args) => func(...args));
