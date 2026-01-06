@@ -199,7 +199,7 @@ export default function App() {
                         )}
                         <div className="flex items-center gap-2 bg-slate-900/50 px-3 py-1 rounded-full border border-white/5">
                             <div className="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse"></div>
-                            <span className="text-[10px] text-slate-400 font-mono">GRIDVID</span>
+                            <span className="text-[10px] text-slate-400 font-mono">GRIDVID WOW</span>
                             <span className="text-[9px] text-slate-600 font-mono ml-1">{appVersion}</span>
                             {isAuthenticated && expirationDate && (
                                 <span className="text-[9px] text-slate-500 font-mono ml-2 border-l border-white/10 pl-2">
