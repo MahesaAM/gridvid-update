@@ -2,6 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const { getOpalFrame } = require('./common-utils');
 
+const { execFile } = require('child_process');
+
 // robust-get-auth-token logic adapted from user's script
 async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@diigimon.com", accountPassword = "Genshin123") {
     logCallback("Starting robust token capture...");
@@ -598,7 +600,83 @@ async function stripAudio(inputPath, logCallback) {
     });
 }
 
-async function downloadVideoFile(url, authToken, savePath, filenameId, logCallback, muteAudio = false) {
+async function getImageDimensions(imagePath) {
+    if (!ffmpegPath) return null;
+    return new Promise((resolve) => {
+        // Use the same path adjustment as fluent-ffmpeg setup
+        const exePath = ffmpegPath.replace('app.asar', 'app.asar.unpacked');
+
+        execFile(exePath, ['-i', imagePath], (error, stdout, stderr) => {
+            // ffmpeg usually writes metadata to stderr
+            const output = stderr || stdout || "";
+            // Regex to find resolution in the Video stream line
+            // Example: Stream #0:0: Video: png, rgba(pc), 512x512 ...
+            const match = output.match(/Video:.*?\b(\d+)x(\d+)\b/);
+
+            if (match && match.length >= 3) {
+                resolve({ width: parseInt(match[1]), height: parseInt(match[2]) });
+            } else {
+                console.log("[GetImageDimensions] Failed to match resolution. Output snippet:", output.substring(0, 300));
+                resolve(null);
+            }
+        });
+    });
+}
+
+async function resizeVideo(videoPath, targetWidth, targetHeight, logCallback) {
+    if (!ffmpeg) return videoPath;
+
+    // Fix for libx264: Width and height must be divisible by 2.
+    // We strictly enforce this to prevent ffmpeg errors.
+    const safeWidth = targetWidth % 2 === 0 ? targetWidth : targetWidth + 1;
+    const safeHeight = targetHeight % 2 === 0 ? targetHeight : targetHeight + 1;
+
+    if (safeWidth !== targetWidth || safeHeight !== targetHeight) {
+        logCallback(`Adjusting target resolution to even numbers: ${safeWidth}x${safeHeight} (from ${targetWidth}x${targetHeight})`);
+    }
+
+    return new Promise((resolve, reject) => {
+        const outputPath = videoPath.replace('.mp4', '_resized.mp4');
+        logCallback(`Resizing video to ${safeWidth}x${safeHeight} (Crop-to-Fill)...`);
+
+        // "Zoom to Fill" / "Cover" Logic:
+        // scale=max(fw\,iw*fh/ih):max(fh\,ih*fw/iw)
+        // Then crop=fw:fh
+        // This scales the video so it fully covers the target box, maintaining aspect ratio, then crops the center.
+        // We use 'iw' (input width) and 'ih' (input height) variables in ffmpeg.
+        const scaleFilter = `scale=max(${safeWidth}\\,iw*${safeHeight}/ih):max(${safeHeight}\\,ih*${safeWidth}/iw)`;
+        const cropFilter = `crop=${safeWidth}:${safeHeight}`;
+
+        ffmpeg(videoPath)
+            // Using complex filter for more advanced logic
+            .complexFilter([
+                `${scaleFilter}[scaled]`,
+                `[scaled]${cropFilter}[cropped]`
+            ], 'cropped')
+            // Ensure compatibility
+            .outputOptions('-c:v libx264')
+            .outputOptions('-c:a copy')
+            .save(outputPath)
+            .on('end', () => {
+                try {
+                    fs.unlinkSync(videoPath);
+                    fs.renameSync(outputPath, videoPath);
+                    logCallback("Video resized (Zoom-to-Fill) successfully.");
+                    resolve(videoPath);
+                } catch (e) {
+                    reject(e);
+                }
+            })
+            .on('error', (err) => {
+                logCallback(`Error resizing video: ${err.message}`);
+                // More detailed ffmpeg error might be available in err.stderr
+                if (err.stderr) logCallback(`FFmpeg Stderr: ${err.stderr}`);
+                reject(err);
+            });
+    });
+}
+
+async function downloadVideoFile(url, authToken, savePath, filenameId, logCallback, muteAudio = false, referenceImagePath = null) {
     if (!fs.existsSync(savePath)) {
         fs.mkdirSync(savePath, { recursive: true });
     }
@@ -632,15 +710,39 @@ async function downloadVideoFile(url, authToken, savePath, filenameId, logCallba
 
         logCallback("Download complete.");
 
+        // 1. Resize if needed (Priority over audio stripping to avoid stripping then re-encoding audio?)
+        // Actually, order matters slightly. 
+        // If we resize first, we re-encode video. Audio is copied.
+        // If we strip audio first, we have silent video. Then we resize.
+        // Let's do Resize FIRST, then Mute. Or Mute then Resize.
+        // If we mute first, simpler.
+
+        let currentPath = filePath;
+
+        if (referenceImagePath && fs.existsSync(referenceImagePath)) {
+            logCallback(`Checking resolution match against: ${path.basename(referenceImagePath)}`);
+            try {
+                const dims = await getImageDimensions(referenceImagePath);
+                if (dims) {
+                    logCallback(`Target Resolution: ${dims.width}x${dims.height}`);
+                    currentPath = await resizeVideo(currentPath, dims.width, dims.height, logCallback);
+                } else {
+                    logCallback("Could not detect image dimensions. Skipping resize.");
+                }
+            } catch (e) {
+                logCallback(`Resize warning: ${e.message}`);
+            }
+        }
+
         if (muteAudio) {
             try {
-                await stripAudio(filePath, logCallback);
+                await stripAudio(currentPath, logCallback);
             } catch (e) {
                 logCallback(`Warning: Failed to strip audio: ${e.message}`);
             }
         }
 
-        return filePath;
+        return currentPath;
     } catch (error) {
         logCallback("Error downloading: " + error.message);
         throw error;

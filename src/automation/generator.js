@@ -251,7 +251,7 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
 
                         if (browser.isConnected()) {
                             const dlDir = savePath || path.join(process.env.USERPROFILE || process.env.HOME || __dirname, 'Downloads');
-                            await downloadVideoFile(downloadUrl, authToken, dlDir, blobId, (msg) => logCallback(`[${currentAccount.email}] ${msg}`), muteAudio);
+                            await downloadVideoFile(downloadUrl, authToken, dlDir, blobId, (msg) => logCallback(`[${currentAccount.email}] ${msg}`), muteAudio, currentItem.imagePath);
                             statusCallback(currentItem.index, 'success');
                             completedCount++;
                         } else {
