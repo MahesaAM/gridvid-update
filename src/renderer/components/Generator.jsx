@@ -400,20 +400,7 @@ export default function Generator({ mode, logs, isHeadless }) {
                     <div className="space-y-4">
                         {mode !== 'image' && (
                             <>
-                                <div className="space-y-1.5">
-                                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider pl-1">Duration</label>
-                                    <div className="relative">
-                                        <select
-                                            value={duration}
-                                            onChange={e => setDuration(e.target.value)}
-                                            className="w-full bg-slate-900/50 border border-slate-700/50 rounded-lg px-3 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-blue-500 focus:bg-slate-900 appearance-none font-medium"
-                                        >
-                                            <option value="5s">5 Seconds</option>
-                                            <option value="8s">8 Seconds</option>
-                                        </select>
-                                        <ChevronRight className="absolute right-3 top-2.5 text-slate-600 rotate-90 pointer-events-none" size={12} />
-                                    </div>
-                                </div>
+
                                 <Toggle
                                     label="Aspect Ratio"
                                     value={aspectRatio}
