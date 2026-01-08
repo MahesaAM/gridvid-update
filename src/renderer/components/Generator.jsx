@@ -69,8 +69,88 @@ function Toggle({ label, options, value, onChange }) {
     );
 }
 
+// --- THUMBNAIL GENERATION UTILS ---
+const generateThumbnail = async (path) => {
+    return new Promise((resolve) => {
+        const img = new Image();
+        // Use file protocol
+        img.src = `file://${path.replace(/\\/g, '/')}`;
+        img.onload = () => {
+            const size = 64; // Thumbnail size (sufficient for w-10 h-10 which is 40px)
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+
+            // Calculate scale to fill (object-cover)
+            // We want the smaller dimension to match 'size', then crop the rest
+            const scale = Math.max(size / img.width, size / img.height);
+            const w = img.width * scale;
+            const h = img.height * scale;
+            const x = (size - w) / 2;
+            const y = (size - h) / 2;
+
+            canvas.width = size;
+            canvas.height = size;
+
+            ctx.drawImage(img, x, y, w, h);
+
+            // Compress to JPEG 50% quality
+            resolve(canvas.toDataURL('image/jpeg', 0.5));
+        };
+        img.onerror = () => {
+            console.warn('Failed to load image for thumbnail:', path);
+            resolve(null);
+        };
+    });
+};
+
+// Queue to process thumbnails one by one to avoid OOM with 4K images
+const thumbnailQueue = {
+    queue: [],
+    processing: false,
+    add(path, callback) {
+        // Check if already cached? (Could add caching later if needed)
+        this.queue.push({ path, callback });
+        this.run();
+    },
+    async run() {
+        if (this.processing) return;
+        if (this.queue.length === 0) return;
+
+        this.processing = true;
+
+        while (this.queue.length > 0) {
+            const { path, callback } = this.queue.shift();
+            try {
+                // Yield to UI thread before heavy lifting
+                await new Promise(r => setTimeout(r, 10));
+                const thumb = await generateThumbnail(path);
+                callback(thumb);
+            } catch (e) {
+                console.error('Thumbnail generation error:', e);
+                callback(null);
+            }
+        }
+
+        this.processing = false;
+    }
+};
+
 // --- LIST ITEMS (MEMOIZED) ---
 const ImageListItem = memo(({ img, index, timer, onRemove, onPromptChange }) => {
+    const [thumbnail, setThumbnail] = useState(null);
+
+    useEffect(() => {
+        let active = true;
+        // Reset thumbnail when path changes (important for reordering/recycling)
+        setThumbnail(null);
+
+        thumbnailQueue.add(img.path, (res) => {
+            if (active) setThumbnail(res);
+        });
+
+        return () => { active = false; };
+    }, [img.path]);
+
     return (
         <div className={cn(
             "flex items-center gap-3 p-2 rounded-lg border transition-all text-xs group",
@@ -89,15 +169,16 @@ const ImageListItem = memo(({ img, index, timer, onRemove, onPromptChange }) => 
 
             {/* Thumbnail */}
             <div className="w-10 h-10 rounded bg-slate-900 flex items-center justify-center shrink-0 overflow-hidden border border-white/5 relative">
-                <img
-                    src={`file://${img.path.replace(/\\/g, '/')}`}
-                    alt={img.name}
-                    className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
-                    onError={(e) => {
-                        e.target.style.display = 'none';
-                        e.target.nextSibling.style.display = 'flex';
-                    }}
-                />
+                {thumbnail ? (
+                    <img
+                        src={thumbnail}
+                        alt={img.name}
+                        className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
+                    />
+                ) : (
+                    <div className="animate-pulse bg-slate-800 w-full h-full" />
+                )}
+
                 <div className="absolute inset-0 hidden items-center justify-center bg-slate-900 text-slate-600">
                     <ImageIcon size={14} />
                 </div>
@@ -191,7 +272,54 @@ const TextListItem = memo(({ text, index, status, timer }) => {
 });
 
 
-export default function Generator({ mode, logs, isHeadless }) {
+// --- LOGS PANEL COMPONENT (ISOLATED) ---
+const LogsPanel = memo(() => {
+    const [logs, setLogs] = useState([]);
+    const logsEndRef = useRef(null);
+
+    useEffect(() => {
+        if (window.api) {
+            const handleLog = (msg) => {
+                setLogs(prev => [...prev.slice(-99), { message: msg, time: new Date().toLocaleTimeString() }]);
+            };
+            window.api.receive('log-update', handleLog);
+
+            // Cleanup not trivial with current 'receive' implementation usually adding listeners
+            // but for this app structure it's fine as LogsPanel is always mounted when in Generator tab
+        }
+    }, []);
+
+    // Auto-scroll logs
+    useEffect(() => {
+        if (logsEndRef.current) {
+            logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    }, [logs]);
+
+    return (
+        <div className="bg-slate-950 border-t border-white/10 h-[140px] flex flex-col shrink-0">
+            <div className="px-3 py-1.5 flex items-center gap-2 border-b border-white/5 bg-slate-900/20">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
+                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">System Logs</span>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 font-mono text-[9px] space-y-0.5 custom-scrollbar">
+                {logs.length === 0 && <div className="text-slate-700 italic px-2">Waiting for activity...</div>}
+                {logs.map((log, i) => (
+                    <div key={i} className="text-slate-400 border-l-2 border-transparent hover:border-white/10 pl-2 py-0.5 hover:bg-white/5 transition-colors">
+                        <span className="text-slate-600 mr-2">[{log.time}]</span>
+                        <span className={cn(
+                            log.message.includes('Error') ? "text-amber-400" :
+                                log.message.includes('Success') ? "text-emerald-400" : "text-slate-300"
+                        )}>{log.message}</span>
+                    </div>
+                ))}
+                <div ref={logsEndRef} />
+            </div>
+        </div>
+    );
+});
+
+export default function Generator({ mode, isHeadless }) {
     const [prompts, setPrompts] = useState('');
     const [images, setImages] = useState([]);
     const [itemStatuses, setItemStatuses] = useState({}); // { [index]: 'pending' | 'success' | 'error' | 'processing' }
@@ -212,7 +340,6 @@ export default function Generator({ mode, logs, isHeadless }) {
 
     const fileInputRef = useRef(null);
     const promptFileInputRef = useRef(null);
-    const logsEndRef = useRef(null);
 
     // Listen to status
     useEffect(() => {
@@ -255,13 +382,6 @@ export default function Generator({ mode, logs, isHeadless }) {
             });
         }
     }, []);
-
-    // Auto-scroll logs
-    useEffect(() => {
-        if (logsEndRef.current) {
-            logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
-        }
-    }, [logs]);
 
     const handleStart = () => {
         if (!savePath) { alert('Please select a save location.'); return; }
@@ -556,26 +676,8 @@ export default function Generator({ mode, logs, isHeadless }) {
                     </div>
                 </div>
 
-                {/* Logs Drawer */}
-                <div className="bg-slate-950 border-t border-white/10 h-[140px] flex flex-col shrink-0">
-                    <div className="px-3 py-1.5 flex items-center gap-2 border-b border-white/5 bg-slate-900/20">
-                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
-                        <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">System Logs</span>
-                    </div>
-                    <div className="flex-1 overflow-y-auto p-2 font-mono text-[9px] space-y-0.5 custom-scrollbar">
-                        {logs.length === 0 && <div className="text-slate-700 italic px-2">Waiting for activity...</div>}
-                        {logs.map((log, i) => (
-                            <div key={i} className="text-slate-400 border-l-2 border-transparent hover:border-white/10 pl-2 py-0.5 hover:bg-white/5 transition-colors">
-                                <span className="text-slate-600 mr-2">[{log.time}]</span>
-                                <span className={cn(
-                                    log.message.includes('Error') ? "text-amber-400" :
-                                        log.message.includes('Success') ? "text-emerald-400" : "text-slate-300"
-                                )}>{log.message}</span>
-                            </div>
-                        ))}
-                        <div ref={logsEndRef} />
-                    </div>
-                </div>
+                {/* Logs Drawer (ISOLATED) */}
+                <LogsPanel />
 
             </div>
         </div>

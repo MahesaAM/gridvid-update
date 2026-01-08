@@ -78,7 +78,21 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
     // Brief stabilization
     if (!authToken) await new Promise(r => setTimeout(r, 1500));
 
-    if (authToken) return authToken;
+    const cleanup = async () => {
+        try {
+            page.off('request', requestHandler);
+            // Re-enabling cache might be good but optional.
+            // Crucially, disable interception to return control to browser.
+            await page.setRequestInterception(false);
+        } catch (e) {
+            // Ignore errors if page is closed
+        }
+    };
+
+    if (authToken) {
+        await cleanup();
+        return authToken;
+    }
 
     logCallback("Token not found immediately. checking for sign in...");
 
@@ -383,6 +397,7 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
         }
     }
 
+    await cleanup();
     return authToken;
 }
 

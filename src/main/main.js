@@ -371,11 +371,72 @@ ipcMain.handle('get-profiles-size', async () => {
 
 ipcMain.handle('delete-all-profiles', async () => {
     const root = getProfilesRoot();
+    console.log(`[DeleteProfiles] Starting deletion of: ${root}`);
+
+    // Helper to kill chrome/chromedriver processes that might lock files
+    const killBrowsers = async () => {
+        return new Promise((resolve) => {
+            const cmd = process.platform === 'win32'
+                ? 'taskkill /F /IM chrome.exe /T & taskkill /F /IM chromedriver.exe /T'
+                : 'pkill -f "Chrome"';
+            exec(cmd, (err) => {
+                // Ignore errors (e.g. process not found)
+                resolve();
+            });
+        });
+    };
+
     try {
-        await fsPromises.rm(root, { recursive: true, force: true });
-        return { success: true };
+        await killBrowsers();
+        // Give a short grace period for OS to release locks
+        await new Promise(r => setTimeout(r, 1000));
+
+        // Retry logic for deletion
+        let attempts = 0;
+        const maxAttempts = 3;
+
+        while (attempts < maxAttempts) {
+            try {
+                if (fs.existsSync(root)) {
+                    // Use specific simplified recursive delete that ignores EBUSY on non-critical files
+                    await fsPromises.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+                }
+                console.log('[DeleteProfiles] Deletion successful.');
+                return { success: true };
+            } catch (err) {
+                console.warn(`[DeleteProfiles] Attempt ${attempts + 1} failed: ${err.message}`);
+
+                // If it's the last attempt, try a "best effort" cleanup
+                // We iterate subfolders and try to delete what we can, ignoring errors
+                if (attempts === maxAttempts - 1) {
+                    console.log('[DeleteProfiles] Performing best-effort cleanup...');
+                    try {
+                        const items = await fsPromises.readdir(root);
+                        for (const item of items) {
+                            try {
+                                await fsPromises.rm(path.join(root, item), { recursive: true, force: true });
+                            } catch (e) {
+                                console.warn(`Skipping locked item: ${item}`);
+                            }
+                        }
+                        // If root still remains, that's fine, we cleared most data
+                        return { success: true, warning: "Some files were locked but most data was cleared." };
+                    } catch (e) {
+                        // If readdir fails, we can't do much
+                    }
+                }
+
+                attempts++;
+                await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
+            }
+        }
+
+        throw new Error("Timed out waiting for file locks to release.");
+
     } catch (error) {
-        return { success: false, error: error.message };
+        console.error('[DeleteProfiles] Fatal error:', error);
+        // Return explicit error message for UI
+        return { success: false, error: `Could not delete profiles: ${error.message} (Is Chrome running?)` };
     }
 });
 

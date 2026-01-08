@@ -20,7 +20,6 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 export default function App() {
     const [activeTab, setActiveTab] = useState('generator'); // 'generator' | 'accounts'
     const [generatorMode, setGeneratorMode] = useState('text'); // 'text' | 'image'
-    const [logs, setLogs] = useState([]);
     const [status, setStatus] = useState('stopped');
     const [isHeadless, setIsHeadless] = useState(true);
     const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -84,9 +83,6 @@ export default function App() {
         validateSession();
 
         if (window.api) {
-            window.api.receive('log-update', (msg) => {
-                setLogs(prev => [...prev.slice(-99), { message: msg, time: new Date().toLocaleTimeString() }]);
-            });
             window.api.receive('automation-status', (s) => setStatus(s));
 
             // Get version
@@ -178,7 +174,7 @@ export default function App() {
                     <div className="flex items-center gap-4">
                         {isAuthenticated && (
                             <>
-                                <label className="flex items-center gap-2 cursor-pointer group hidden">
+                                <label className="flex items-center gap-2 cursor-pointer group ">
                                     <span className={cn("text-[10px] font-medium transition-colors", isHeadless ? "text-blue-400" : "text-slate-500")}>
                                         Headless
                                     </span>
@@ -279,7 +275,7 @@ export default function App() {
                     ) : (
                         <>
                             <div style={{ display: activeTab === 'generator' ? 'block' : 'none', height: '100%' }}>
-                                <Generator mode={generatorMode} logs={logs} isHeadless={isHeadless} />
+                                <Generator mode={generatorMode} isHeadless={isHeadless} />
                             </div>
                             <div style={{ display: activeTab === 'accounts' ? 'block' : 'none', height: '100%' }}>
                                 <AccountManager />

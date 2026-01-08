@@ -23,21 +23,38 @@ function findFileRecurring(dir, filename) {
 
 function getLocalChromePath() {
     try {
-        const rootDir = process.cwd();
-        let targetDir = '';
+        let potentialDirs = [];
+
+        // 1. Development: Check root of the project
+        potentialDirs.push(process.cwd());
+
+        // 2. Production: Check resources path (app.asar.unpacked location)
+        // In electron-builder, unpacked files are in resources/app.asar.unpacked/
+        if (process.resourcesPath) {
+            potentialDirs.push(path.join(process.resourcesPath, 'app.asar.unpacked'));
+            potentialDirs.push(process.resourcesPath); // sometimes direct
+        }
+
         let execName = '';
+        let folderName = '';
 
         if (process.platform === 'darwin') {
-            targetDir = path.join(rootDir, 'browsers_mac');
+            folderName = 'browsers_mac';
             execName = 'Google Chrome for Testing';
         } else if (process.platform === 'win32') {
-            targetDir = path.join(rootDir, 'puppeteer-chromium');
+            folderName = 'puppeteer-chromium';
             execName = 'chrome.exe';
         } else {
             return null;
         }
 
-        return findFileRecurring(targetDir, execName);
+        for (const baseDir of potentialDirs) {
+            const targetDir = path.join(baseDir, folderName);
+            const found = findFileRecurring(targetDir, execName);
+            if (found) return found;
+        }
+
+        return null;
     } catch (e) {
         console.error('Error finding local chrome:', e);
         return null;
@@ -54,18 +71,18 @@ function getChromiumPath(options = {}) {
         }
     }
 
-    // 1. Check for System Google Chrome (Priority 1)
-    const systemPath = getSystemChromePath();
-    if (systemPath) {
-        console.log(`[Chromium] Using System Google Chrome: ${systemPath}`);
-        return systemPath;
-    }
-
-    // 2. Check local project-level Chrome (Priority 2)
+    // 1. Check local project-level Chrome (Priority 1 - User Request)
     const localPath = getLocalChromePath();
     if (localPath) {
         console.log(`[Chromium] Using local download: ${localPath}`);
         return localPath;
+    }
+
+    // 2. Check for System Google Chrome (Priority 2)
+    const systemPath = getSystemChromePath();
+    if (systemPath) {
+        console.log(`[Chromium] Using System Google Chrome: ${systemPath}`);
+        return systemPath;
     }
 
     // 3. Fallback to puppeteer's bundled chromium
