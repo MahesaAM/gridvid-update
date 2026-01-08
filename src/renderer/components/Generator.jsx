@@ -551,7 +551,7 @@ export default function Generator({ mode, isHeadless }) {
                             <input
                                 type="range"
                                 min="1"
-                                max="5"
+                                max="10"
                                 step="1"
                                 value={concurrency}
                                 onChange={(e) => setConcurrency(parseInt(e.target.value))}
@@ -637,7 +637,9 @@ export default function Generator({ mode, isHeadless }) {
                         <div className="flex flex-col">
                             <span className="text-[10px] font-bold text-slate-300">{activeAccount.email}</span>
                             <span className="text-[8px] text-slate-500 font-mono">
-                                {activeAccount.index ? `Cycle #${activeAccount.index}` : 'Ready'}
+                                {activeAccount.usage !== undefined
+                                    ? `Used: ${activeAccount.usage}/${activeAccount.limit || 10}`
+                                    : (activeAccount.index ? `Cycle #${activeAccount.index}` : 'Ready')}
                             </span>
                         </div>
                     </div>
@@ -680,6 +682,6 @@ export default function Generator({ mode, isHeadless }) {
                 <LogsPanel />
 
             </div>
-        </div>
+        </div >
     );
 }

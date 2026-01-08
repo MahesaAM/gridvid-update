@@ -94,214 +94,251 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
         return authToken;
     }
 
-    logCallback("Token not found immediately. checking for sign in...");
+    // [NEW] CHECK FOR EXISTING SESSION / LOGGED IN STATE
+    // Before searching for "Sign In" buttons, let's see if we are already seeing the app.
+    // Common indicator: Google Profile Avatar in top right.
+    // Opal specific: The main app interface is visible.
 
+    let isAlreadyLoggedIn = false;
     try {
-        // Find & Click Sign In
-        // Find & Click Sign In
-        const performClick = async () => {
-            const clickStartTime = Date.now();
-            while (Date.now() - clickStartTime < 10000) { // Retry for 10s
+        // Quick check for Profile Avatar (generic Google class usually 'gb_A' or aria-label containing account info)
+        // Or check if "Sign In" is ABSENT and we are on opal.google
+        const profileSelector = 'a[aria-label^="Google Account"], a[aria-label*="Account"], img.gb_A, div.gb_A';
+        const profile = await page.$(profileSelector);
+
+        if (profile) {
+            const label = await page.evaluate(el => el.getAttribute('aria-label'), profile);
+            logCallback(`Active session detected (Profile found: ${label}). Skipping login interactions.`);
+            isAlreadyLoggedIn = true;
+        } else {
+            // Second check: usage of #opal-app without landing page overlay?
+            // Harder to detect reliably without more selectors. 
+            // Let's rely on the ABSENCE of "Sign In" buttons later, BUT we want to avoid the "Wait for Sign In" delay if possible.
+        }
+    } catch (e) { }
+
+    if (isAlreadyLoggedIn) {
+        // If we are logged in but don't have token yet, we just wait/refresh.
+        logCallback("Already logged in. Waiting for token to appear...");
+        // Maybe force a reload if it's taking too long?
+        if (!authToken) {
+            await new Promise(r => setTimeout(r, 2000));
+            if (!authToken) {
+                logCallback("Still no token. Forcing reload to trigger network traffic...");
+                await page.reload({ waitUntil: 'domcontentloaded' });
+            }
+        }
+    } else {
+        // Only enter this block if NOT definitely logged in
+        logCallback("Token not found immediately & No session detected. Checking for sign in...");
+        try {
+            // Existing Sign-In Logic...
+            // Find & Click Sign In
+            // Find & Click Sign In
+            const performClick = async () => {
+                const clickStartTime = Date.now();
+                while (Date.now() - clickStartTime < 10000) { // Retry for 10s
+                    try {
+                        // Check if we are already on login page (email input exists)
+                        const emailSelector = 'input[type="email"]';
+                        if (await page.$(emailSelector)) {
+                            logCallback("Already on login page (email input found).");
+                            return true;
+                        }
+
+                        const frameElement = await page.$('#opal-app');
+                        let frame = null;
+                        if (frameElement) {
+                            frame = await frameElement.contentFrame();
+                        }
+
+                        const searchAndClick = async (scope, scopeName) => {
+                            // 1. Try generic Google Sign In href
+                            const loginButton = await scope.$('a[href*="accounts.google.com"]');
+                            if (loginButton) {
+                                try {
+                                    if (await scope.evaluate(el => el.offsetParent !== null, loginButton)) {
+                                        logCallback(`Found Sign In button (href) in ${scopeName}. Clicking...`);
+                                        await loginButton.click();
+                                        return true;
+                                    }
+                                } catch (e) { }
+                            }
+
+                            // 2. Text Search on wider candidates
+                            const buttons = await scope.$$('button, a, div[role="button"], span[role="button"]');
+                            for (const btn of buttons) {
+                                // Skip invisible
+                                try {
+                                    const visible = await scope.evaluate(el => el.offsetParent !== null, btn);
+                                    if (!visible) continue;
+
+                                    const t = await scope.evaluate(el => (el.textContent || el.innerText || "").trim().toLowerCase(), btn);
+                                    if (t === "sign in" || t === "log in" || t === "login" || t === "masuk" || t === "sign-in") {
+                                        logCallback(`Found Sign In button ("${t}") in ${scopeName}. Clicking...`);
+                                        try { await btn.click(); } catch (e) { await scope.evaluate(el => el.click(), btn); }
+                                        return true;
+                                    }
+                                } catch (e) { }
+                            }
+                            return false;
+                        };
+
+                        let clicked = await searchAndClick(page, "main page");
+                        if (!clicked && frame) clicked = await searchAndClick(frame, "iframe");
+
+                        if (clicked) return true;
+
+                        await new Promise(r => setTimeout(r, 1000));
+                    } catch (e) {
+                        logCallback("Error finding sign in button: " + e.message);
+                        await new Promise(r => setTimeout(r, 1000));
+                    }
+                }
+                logCallback("Starting manual login check (timed out finding button)...");
+                return false;
+            };
+
+            const clicked = await performClick();
+            let loginPage = page;
+
+            if (clicked) {
+                logCallback("Sign in clicked. Waiting for popup or navigation...");
+                await new Promise(r => setTimeout(r, 1000));
                 try {
-                    // Check if we are already on login page (email input exists)
-                    const emailSelector = 'input[type="email"]';
-                    if (await page.$(emailSelector)) {
-                        logCallback("Already on login page (email input found).");
-                        return true;
-                    }
-
-                    const frameElement = await page.$('#opal-app');
-                    let frame = null;
-                    if (frameElement) {
-                        frame = await frameElement.contentFrame();
-                    }
-
-                    const searchAndClick = async (scope, scopeName) => {
-                        // 1. Try generic Google Sign In href
-                        const loginButton = await scope.$('a[href*="accounts.google.com"]');
-                        if (loginButton) {
-                            try {
-                                if (await scope.evaluate(el => el.offsetParent !== null, loginButton)) {
-                                    logCallback(`Found Sign In button (href) in ${scopeName}. Clicking...`);
-                                    await loginButton.click();
-                                    return true;
-                                }
-                            } catch (e) { }
+                    const newTarget = await page.browser().waitForTarget(target => target.opener() === page.target(), { timeout: 10000 });
+                    if (newTarget) {
+                        logCallback(">>> POPUP DETECTED! Switching context <<<");
+                        loginPage = await newTarget.page();
+                        if (!loginPage) {
+                            await new Promise(r => setTimeout(r, 1000));
+                            loginPage = await newTarget.page();
                         }
-
-                        // 2. Text Search on wider candidates
-                        const buttons = await scope.$$('button, a, div[role="button"], span[role="button"]');
-                        for (const btn of buttons) {
-                            // Skip invisible
-                            try {
-                                const visible = await scope.evaluate(el => el.offsetParent !== null, btn);
-                                if (!visible) continue;
-
-                                const t = await scope.evaluate(el => (el.textContent || el.innerText || "").trim().toLowerCase(), btn);
-                                if (t === "sign in" || t === "log in" || t === "login" || t === "masuk" || t === "sign-in") {
-                                    logCallback(`Found Sign In button ("${t}") in ${scopeName}. Clicking...`);
-                                    try { await btn.click(); } catch (e) { await scope.evaluate(el => el.click(), btn); }
-                                    return true;
-                                }
-                            } catch (e) { }
-                        }
-                        return false;
-                    };
-
-                    let clicked = await searchAndClick(page, "main page");
-                    if (!clicked && frame) clicked = await searchAndClick(frame, "iframe");
-
-                    if (clicked) return true;
-
-                    await new Promise(r => setTimeout(r, 1000));
+                    }
                 } catch (e) {
-                    logCallback("Error finding sign in button: " + e.message);
-                    await new Promise(r => setTimeout(r, 1000));
+                    logCallback("No new target/popup detected. Assuming same-page.");
+                }
+
+                if (loginPage && loginPage !== page) {
+                    // Removed waitForNetworkIdle to attach interceptor immediately to avoid missing early requests
+                    await loginPage.setRequestInterception(true);
+                    loginPage.on('request', requestHandler);
                 }
             }
-            logCallback("Starting manual login check (timed out finding button)...");
-            return false;
-        };
 
-        const clicked = await performClick();
-        let loginPage = page;
-
-        if (clicked) {
-            logCallback("Sign in clicked. Waiting for popup or navigation...");
-            await new Promise(r => setTimeout(r, 1000));
+            // --- ACCOUNT SELECTION ---
             try {
-                const newTarget = await page.browser().waitForTarget(target => target.opener() === page.target(), { timeout: 10000 });
-                if (newTarget) {
-                    logCallback(">>> POPUP DETECTED! Switching context <<<");
-                    loginPage = await newTarget.page();
-                    if (!loginPage) {
+                await new Promise(r => setTimeout(r, 1500));
+                const chooseAccountHeader = await loginPage.evaluate(() => {
+                    const h1 = document.querySelector('h1, h2, div[role="heading"]');
+                    return h1 ? h1.innerText : "";
+                });
+
+                if (chooseAccountHeader.toLowerCase().includes("choose an account") || chooseAccountHeader.toLowerCase().includes("pilih akun")) {
+                    logCallback("Detected 'Choose an account' screen.");
+                    logCallback("User requested fresh login. Clicking 'Use another account'...");
+
+                    const otherAccountBtn = await loginPage.evaluateHandle(() => {
+                        const items = Array.from(document.querySelectorAll('li, div[role="link"], span'));
+                        return items.find(i => i.innerText.toLowerCase().includes("use another account") || i.innerText.toLowerCase().includes("gunakan akun lain"));
+                    });
+
+                    if (otherAccountBtn.asElement()) {
+                        await otherAccountBtn.asElement().click();
+                        await new Promise(r => setTimeout(r, 2000));
+                    } else {
+                        logCallback("Could not find 'Use another account' button.");
+                    }
+                }
+            } catch (e) { }
+
+            // --- CREDENTIALS ENTRY ---
+            const emailSelector = 'input[type="email"]';
+            try {
+                await loginPage.waitForSelector(emailSelector, { visible: true, timeout: 5000 });
+                logCallback(`Auto-filling email: ${accountEmail}`);
+                await loginPage.type(emailSelector, accountEmail, { delay: 50 });
+                await new Promise(r => setTimeout(r, 500));
+                const nextButtonSelector = '#identifierNext button';
+                const nextBtn = await loginPage.$(nextButtonSelector);
+                if (nextBtn) await nextBtn.click();
+                else await loginPage.keyboard.press('Enter');
+            } catch (e) { }
+
+            const passwordSelector = 'input[type="password"]';
+            try {
+                await loginPage.waitForSelector(passwordSelector, { visible: true, timeout: 8000 });
+                await new Promise(r => setTimeout(r, 1000));
+                logCallback("Auto-filling password...");
+                await loginPage.type(passwordSelector, accountPassword, { delay: 50 });
+                await new Promise(r => setTimeout(r, 500));
+                const passwordNextSelector = '#passwordNext button';
+                const pwNextBtn = await loginPage.$(passwordNextSelector);
+                if (pwNextBtn) await pwNextBtn.click();
+                else await loginPage.keyboard.press('Enter');
+            } catch (e) { }
+
+            // Consent Loop
+            // --- ROBUST CONSENT / SPEEDBUMP HANDLER ---
+            let consentClicks = 0;
+            try {
+                const startTime = Date.now();
+                // Extended loop to 25s to catch slow loads or multiple screens
+                while (Date.now() - startTime < 25000) {
+                    if (loginPage.isClosed()) break;
+
+                    // 1. Check for "Early Access" BLOCK / Hard Rejection
+                    try {
+                        const pageText = await loginPage.evaluate(() => document.body.innerText.toLowerCase());
+                        if (pageText.includes("early access") && (pageText.includes("doesn't have access") || pageText.includes("tidak memiliki akses"))) {
+                            throw new Error("Account Blocked: Early Access Denied (Need Waiting List).");
+                        }
+                    } catch (e) { if (e.message.includes("Account Blocked")) throw e; }
+
+                    // 2. Click Consent Buttons
+                    const btnClicked = await loginPage.evaluate(() => {
+                        // Broader list of keywords
+                        const keywords = [
+                            "continue", "lanjutkan", "next", "berikutnya",
+                            "i agree", "saya setuju", "accept", "allow", "izinkan",
+                            "confirm", "konfirmasi", "i understand", "saya mengerti", "mengerti", "paham",
+                            "yes, i'm in", "ya, saya ikut", "no, thanks", "jangan sekarang", "not now",
+                            "got it", "oke"
+                        ];
+
+                        const candidates = Array.from(document.querySelectorAll('button, input[type="submit"], div[role="button"], span[role="button"]'));
+
+                        for (const btn of candidates) {
+                            // Ignore hidden elements
+                            if (btn.offsetParent === null) continue;
+
+                            const t = (btn.innerText || btn.value || "").toLowerCase().trim();
+                            // Exact match or includes for longer sentences
+                            if (keywords.some(k => t === k || (t.length < 30 && t.includes(k)))) {
+                                btn.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    });
+
+                    if (btnClicked) {
+                        consentClicks++;
+                        logCallback(`Clicked consent/interstitial button. (Click #${consentClicks})`);
+                        await new Promise(r => setTimeout(r, 2000)); // Wait for nav
+                    } else {
                         await new Promise(r => setTimeout(r, 1000));
-                        loginPage = await newTarget.page();
                     }
                 }
             } catch (e) {
-                logCallback("No new target/popup detected. Assuming same-page.");
+                if (e.message.includes("Account Blocked")) throw e;
+                // Otherwise ignore regex errors
             }
 
-            if (loginPage && loginPage !== page) {
-                // Removed waitForNetworkIdle to attach interceptor immediately to avoid missing early requests
-                await loginPage.setRequestInterception(true);
-                loginPage.on('request', requestHandler);
-            }
-        }
-
-        // --- ACCOUNT SELECTION ---
-        try {
-            await new Promise(r => setTimeout(r, 1500));
-            const chooseAccountHeader = await loginPage.evaluate(() => {
-                const h1 = document.querySelector('h1, h2, div[role="heading"]');
-                return h1 ? h1.innerText : "";
-            });
-
-            if (chooseAccountHeader.toLowerCase().includes("choose an account") || chooseAccountHeader.toLowerCase().includes("pilih akun")) {
-                logCallback("Detected 'Choose an account' screen.");
-                logCallback("User requested fresh login. Clicking 'Use another account'...");
-
-                const otherAccountBtn = await loginPage.evaluateHandle(() => {
-                    const items = Array.from(document.querySelectorAll('li, div[role="link"], span'));
-                    return items.find(i => i.innerText.toLowerCase().includes("use another account") || i.innerText.toLowerCase().includes("gunakan akun lain"));
-                });
-
-                if (otherAccountBtn.asElement()) {
-                    await otherAccountBtn.asElement().click();
-                    await new Promise(r => setTimeout(r, 2000));
-                } else {
-                    logCallback("Could not find 'Use another account' button.");
-                }
-            }
-        } catch (e) { }
-
-        // --- CREDENTIALS ENTRY ---
-        const emailSelector = 'input[type="email"]';
-        try {
-            await loginPage.waitForSelector(emailSelector, { visible: true, timeout: 5000 });
-            logCallback(`Auto-filling email: ${accountEmail}`);
-            await loginPage.type(emailSelector, accountEmail, { delay: 50 });
-            await new Promise(r => setTimeout(r, 500));
-            const nextButtonSelector = '#identifierNext button';
-            const nextBtn = await loginPage.$(nextButtonSelector);
-            if (nextBtn) await nextBtn.click();
-            else await loginPage.keyboard.press('Enter');
-        } catch (e) { }
-
-        const passwordSelector = 'input[type="password"]';
-        try {
-            await loginPage.waitForSelector(passwordSelector, { visible: true, timeout: 8000 });
-            await new Promise(r => setTimeout(r, 1000));
-            logCallback("Auto-filling password...");
-            await loginPage.type(passwordSelector, accountPassword, { delay: 50 });
-            await new Promise(r => setTimeout(r, 500));
-            const passwordNextSelector = '#passwordNext button';
-            const pwNextBtn = await loginPage.$(passwordNextSelector);
-            if (pwNextBtn) await pwNextBtn.click();
-            else await loginPage.keyboard.press('Enter');
-        } catch (e) { }
-
-        // Consent Loop
-        // --- ROBUST CONSENT / SPEEDBUMP HANDLER ---
-        let consentClicks = 0;
-        try {
-            const startTime = Date.now();
-            // Extended loop to 25s to catch slow loads or multiple screens
-            while (Date.now() - startTime < 25000) {
-                if (loginPage.isClosed()) break;
-
-                // 1. Check for "Early Access" BLOCK / Hard Rejection
-                try {
-                    const pageText = await loginPage.evaluate(() => document.body.innerText.toLowerCase());
-                    if (pageText.includes("early access") && (pageText.includes("doesn't have access") || pageText.includes("tidak memiliki akses"))) {
-                        throw new Error("Account Blocked: Early Access Denied (Need Waiting List).");
-                    }
-                } catch (e) { if (e.message.includes("Account Blocked")) throw e; }
-
-                // 2. Click Consent Buttons
-                const btnClicked = await loginPage.evaluate(() => {
-                    // Broader list of keywords
-                    const keywords = [
-                        "continue", "lanjutkan", "next", "berikutnya",
-                        "i agree", "saya setuju", "accept", "allow", "izinkan",
-                        "confirm", "konfirmasi", "i understand", "saya mengerti", "mengerti", "paham",
-                        "yes, i'm in", "ya, saya ikut", "no, thanks", "jangan sekarang", "not now",
-                        "got it", "oke"
-                    ];
-
-                    const candidates = Array.from(document.querySelectorAll('button, input[type="submit"], div[role="button"], span[role="button"]'));
-
-                    for (const btn of candidates) {
-                        // Ignore hidden elements
-                        if (btn.offsetParent === null) continue;
-
-                        const t = (btn.innerText || btn.value || "").toLowerCase().trim();
-                        // Exact match or includes for longer sentences
-                        if (keywords.some(k => t === k || (t.length < 30 && t.includes(k)))) {
-                            btn.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-
-                if (btnClicked) {
-                    consentClicks++;
-                    logCallback(`Clicked consent/interstitial button. (Click #${consentClicks})`);
-                    await new Promise(r => setTimeout(r, 2000)); // Wait for nav
-                } else {
-                    await new Promise(r => setTimeout(r, 1000));
-                }
-            }
         } catch (e) {
-            if (e.message.includes("Account Blocked")) throw e;
-            // Otherwise ignore regex errors
+            logCallback("Auto-login logic error: " + e.message);
         }
-
-    } catch (e) {
-        logCallback("Auto-login logic error: " + e.message);
-    }
+    } // End of isAlreadyLoggedIn Check
 
     // Fallback Probe
     if (!authToken) {
@@ -484,24 +521,21 @@ async function generateVideoAPI(authToken, prompt, aspectRatio, logCallback, ima
     let generatedPrompt = finalPrompt;
 
     // STEP 1: If Image is present, use Gemini to generate the prompt
+    // [DISABLED] The captured token from Opal does not have 'generativelanguage' scope, causing 403 errors.
+    // relying on native 'reference_image' support in executionInputs instead.
+    /*
     if (imagePath && fs.existsSync(imagePath)) {
         try {
-            // We append the user's prompt to the "Define Animation instructions" part of the system prompt if we wanted to be dynamic,
-            // but the HAR hardcoded the system prompt.
-            // For now, we'll let generateImagePrompt handle the image-to-text. 
-            // The HAR "text" field ends with "Upload Image:\n\"\"\"\n". 
-            // It seems the user's instruction in the HAR was implicit or part of the "text" block if there was any.
-            // The logic below assumes we strictly follow the image-to-video flow.
-
             const geminiText = await generateImagePrompt(authToken, imagePath, logCallback);
             generatedPrompt = geminiText; // Use the generated text as the main prompt
-
+ 
             logCallback(`Using Gemini Text for Video Gen: ${generatedPrompt}`);
-
+ 
         } catch (e) {
             logCallback(`Gemini generation failed, falling back to original prompt: ${e.message}`);
         }
     }
+    */
 
     const augmentedPrompt = `${generatedPrompt} --aspect_ratio ${finalRatio} --duration ${finalDuration}`;
     logCallback(`Sent Prompt: ${augmentedPrompt}`);

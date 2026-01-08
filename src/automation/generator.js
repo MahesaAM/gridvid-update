@@ -36,6 +36,7 @@ class AccountPool {
             busy: false,
             status: 'ok',
             lastUsed: 0,
+            usageCount: 0, // [NEW] Track generations per session
             cooldownUntil: 0 // [NEW] Timestamp when account is ready again
         }));
     }
@@ -178,7 +179,7 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
                 const stats = pool.getStats();
                 // Avoid spamming logs too much, maybe only log every 5th retry? 
                 // For now, let's log once per wait cycle is fine if wait is 2s.
-                logCallback(`[Worker ${workerId}] Waiting for account... (Avail=${stats.available}, Cooling=${stats.cooling}, Busy=${stats.busy})`);
+                // logCallback(`[Worker ${workerId}] Waiting...`); // Too spammy
                 await new Promise(r => setTimeout(r, 2000));
                 continue;
             }
@@ -191,7 +192,9 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
             if (accountCallback) accountCallback({
                 email: currentAccount.email,
                 index: accountInd + 1,
-                total: accounts.length
+                total: accounts.length,
+                usage: currentAccount.usageCount,
+                limit: 10
             });
 
             let browser = null;
@@ -231,94 +234,88 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
                     });
                 }
 
-                authToken = await getAuthTokenFromPage(page, (msg) => logCallback(`[${currentAccount.email}] ${msg}`), currentAccount.email, currentAccount.password);
+                authToken = await getAuthTokenFromPage(page, (msg) => {
+                    // Filter Login Logs
+                    if (msg.includes('Auto-filling') || msg.includes('Found Sign In') || msg.includes('Detected')) return;
+                    if (msg.includes('TOKEN FOUND')) logCallback(`[${currentAccount.email}] Login successful.`);
+                    // logCallback(`[${currentAccount.email}] ${msg}`); // verbose
+                }, currentAccount.email, currentAccount.password);
 
                 if (!authToken) {
                     throw new Error("Failed to authenticate.");
                 }
 
-                // D. Process Items with this Account
-                // We assume we can process at least one item.
-                // We loop here to reuse the browser session for subsequent items if possible (Optimization),
-                // BUT we should respect the "rotation" requirement.
-                // However, "smart rotation" is usually for *load balancing*. 
-                // Reusing the same browser for a few items is much faster than restarting every time.
-                // Let's implement a "Batch Mode": Process X items then yield, or process until empty.
-                // Given the user wants "speed", keeping the browser open is best.
+                // D. Process ONE Item (Strict Rotation)
+                // We assume queue > 0 because of outer loop check.
+                const currentItem = queue.shift();
 
-                while (queue.length > 0 && !isStopped) {
-                    if (queue.length === 0) break;
+                statusCallback(currentItem.index, 'pending');
+                const label = currentItem.imagePath ? `Image ${path.basename(currentItem.imagePath)}` : `"${currentItem.text.substring(0, 15)}..."`;
+                logCallback(`[${currentAccount.email}] Processing (${currentItem.index + 1}): ${label}`);
 
-                    // Peek/Take item
-                    // We need to be careful with concurrency here. JavaScript is single-threaded so `queue.shift()` is atomic safe.
-                    const currentItem = queue.shift();
+                try {
+                    const { downloadUrl, blobId } = await generateVideoAPI(
+                        authToken,
+                        currentItem.text,
+                        aspectRatio,
+                        (msg) => {
+                            // Simplified Log Filter
+                            if (msg.includes('Generatng') || msg.includes('Success') || msg.includes('Error')) {
+                                logCallback(`[${currentAccount.email}] ${msg}`);
+                            }
+                        },
+                        currentItem.imagePath,
+                        duration
+                    );
 
-                    statusCallback(currentItem.index, 'pending');
-                    const label = currentItem.imagePath ? `Image ${path.basename(currentItem.imagePath)}` : `"${currentItem.text.substring(0, 15)}... "`;
-                    logCallback(`[${currentAccount.email}] Processing (${currentItem.index + 1}): ${label}`);
+                    if (isStopped) throw new Error("Stopped by user");
 
-                    try {
-                        const { downloadUrl, blobId } = await generateVideoAPI(
+                    if (browser.isConnected()) {
+                        const dlDir = savePath || path.join(process.env.USERPROFILE || process.env.HOME || __dirname, 'Downloads');
+                        await downloadVideoFile(
+                            downloadUrl,
                             authToken,
-                            currentItem.text,
-                            aspectRatio,
-                            (msg) => logCallback(`[${currentAccount.email}] ${msg}`),
+                            dlDir,
+                            blobId,
+                            (msg) => {
+                                if (msg.includes('Download') || msg.includes('Processing')) logCallback(`[${currentAccount.email}] ${msg}`);
+                            },
+                            muteAudio,
                             currentItem.imagePath,
-                            duration
+                            () => statusCallback(currentItem.index, 'processing')
                         );
+                        statusCallback(currentItem.index, 'success');
+                        completedCount++;
+                        currentAccount.usageCount++;
 
-                        if (isStopped) throw new Error("Stopped by user");
-
-                        if (browser.isConnected()) {
-                            const dlDir = savePath || path.join(process.env.USERPROFILE || process.env.HOME || __dirname, 'Downloads');
-                            await downloadVideoFile(
-                                downloadUrl,
-                                authToken,
-                                dlDir,
-                                blobId,
-                                (msg) => logCallback(`[${currentAccount.email}] ${msg}`),
-                                muteAudio,
-                                currentItem.imagePath,
-                                () => statusCallback(currentItem.index, 'processing') // onProcessingStart
-                            );
-                            statusCallback(currentItem.index, 'success');
-                            completedCount++;
-                        } else {
-                            throw new Error("Browser disconnected during download.");
-                        }
-
-                    } catch (err) {
-                        const errMsg = err.message || "";
-                        if (errMsg === "Stopped by user") {
-                            statusCallback(currentItem.index, 'error');
-                            throw err;
-                        }
-
-                        if (errMsg.includes("Sensitive Content")) {
-                            logCallback(`[${currentAccount.email}] 🛑 Safety Reset. Skipping prompt...`);
-                            statusCallback(currentItem.index, 'error');
-                            continue;
-                        }
-
-                        // Handle Limits / Quota
-                        if (errMsg.includes("429") || errMsg.includes("403") || errMsg.includes("limit") || errMsg.includes("quota") || errMsg.includes("Quota Exceeded")) {
-                            logCallback(`[${currentAccount.email}] 🛑 Limit Reached. Waiting for token...`);
-                            statusCallback(currentItem.index, 'waiting'); // Notify UI to pause timer/show waiting
-                            queue.unshift(currentItem); // Requeue item logic
+                        // Soft Limit Check
+                        if (currentAccount.usageCount >= 10) {
+                            logCallback(`[${currentAccount.email}] Daily limit (10) reached.`);
                             accountStatus = 'limited';
-                            break; // Break inner loop to release account
                         }
+                    } else {
+                        throw new Error("Browser disconnected.");
+                    }
 
-                        // Timeout or other network errors
-                        if (errMsg.includes("Timeout")) {
-                            logCallback(`[${currentAccount.email}] ⚠️ Timeout. Retrying...`);
-                            queue.unshift(currentItem);
-                            break;
-                        }
+                } catch (err) {
+                    const errMsg = err.message || "";
+                    if (errMsg === "Stopped by user") {
+                        statusCallback(currentItem.index, 'error');
+                        throw err;
+                    }
 
+                    if (errMsg.includes("Sensitive Content")) {
+                        logCallback(`[${currentAccount.email}] 🛑 Safety Reset.`);
+                        statusCallback(currentItem.index, 'error');
+                        // No queue unshift for safety violation, skip it
+                    } else if (errMsg.includes("429") || errMsg.includes("403") || errMsg.includes("limit") || errMsg.includes("quota")) {
+                        logCallback(`[${currentAccount.email}] 🛑 Limit Reached.`);
+                        statusCallback(currentItem.index, 'waiting');
+                        queue.unshift(currentItem);
+                        accountStatus = 'limited';
+                    } else {
                         logCallback(`[${currentAccount.email}] ⚠️ Error: ${errMsg}`);
-                        queue.unshift(currentItem); // Requeue transient error
-                        break;
+                        queue.unshift(currentItem); // Retry
                     }
                 }
 
@@ -409,8 +406,8 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
 
     // 4. Start Workers
     const activeWorkers = [];
-    // We cap at the requested concurrency OR 5 (hard max) as per user request
-    const actualConcurrency = Math.min(concurrency, 5);
+    // We cap at the requested concurrency OR 10 (hard max) as per user request
+    const actualConcurrency = Math.min(concurrency, 10);
 
     logCallback(`Spawning ${actualConcurrency} workers (Staggered start)...`);
 
