@@ -178,7 +178,7 @@ export default function App() {
                     <div className="flex items-center gap-4">
                         {isAuthenticated && (
                             <>
-                                <label className="flex items-center gap-2 cursor-pointer group hidden">
+                                <label className="flex items-center gap-2 cursor-pointer group ">
                                     <span className={cn("text-[10px] font-medium transition-colors", isHeadless ? "text-blue-400" : "text-slate-500")}>
                                         Headless
                                     </span>

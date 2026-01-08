@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Type, Image as ImageIcon, Play, Upload, FolderOpen, Save, Layers, Clock, Monitor, ChevronRight, Volume2, VolumeX } from 'lucide-react';
+import React, { useState, useRef, useEffect, memo } from 'react';
+import { Type, Image as ImageIcon, Play, Upload, FolderOpen, Save, Layers, Clock, Monitor, ChevronRight, Volume2, VolumeX, AlertCircle, CheckCircle2, X } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -7,21 +7,57 @@ function cn(...inputs) {
     return twMerge(clsx(inputs));
 }
 
-// Simple Toggle Component
+// --- ISOLATED TIMER COMPONENT ---
+// This component handles its own updates (60fps) so the parent list doesn't re-render.
+const DurationTimer = memo(({ start, end }) => {
+    const [duration, setDuration] = useState('0.00');
+    const requestRef = useRef();
+
+    useEffect(() => {
+        if (!start) return;
+
+        // If finished, just set static value
+        if (end) {
+            const d = Math.max(0, end - start);
+            setDuration((d / 1000).toFixed(2));
+            return;
+        }
+
+        // If running, animate
+        const animate = () => {
+            const d = Math.max(0, Date.now() - start);
+            setDuration((d / 1000).toFixed(2));
+            requestRef.current = requestAnimationFrame(animate);
+        };
+        requestRef.current = requestAnimationFrame(animate);
+
+        return () => {
+            if (requestRef.current) cancelAnimationFrame(requestRef.current);
+        };
+    }, [start, end]);
+
+    return (
+        <div className="font-mono text-[9px] text-slate-500 font-medium bg-slate-950/30 px-1.5 py-0.5 rounded border border-white/5 whitespace-nowrap">
+            {duration}s
+        </div>
+    );
+});
+
+// --- TOGGLE COMPONENT ---
 function Toggle({ label, options, value, onChange }) {
     return (
-        <div className="space-y-2">
-            <label className="text-xs font-medium text-slate-400 block">{label}</label>
-            <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-700/50">
+        <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider pl-1">{label}</label>
+            <div className="flex bg-slate-950/50 rounded-lg p-0.5 border border-white/5">
                 {options.map((opt) => (
                     <button
                         key={opt.value}
                         onClick={() => onChange(opt.value)}
                         className={cn(
-                            "flex-1 py-2 rounded-md text-xs font-medium transition-all flex flex-col items-center gap-1",
+                            "flex-1 py-1.5 rounded-md text-[10px] font-medium transition-all flex items-center justify-center gap-1.5",
                             value === opt.value
-                                ? "bg-white bg-[linear-gradient(135deg,#e0e7ff_0%,#ffffff_50%,#e0e7ff_100%)] text-blue-950 shadow-sm font-bold"
-                                : "text-slate-500 hover:text-slate-300 hover:bg-slate-800/50"
+                                ? "bg-slate-800 text-slate-200 shadow-sm border border-slate-700"
+                                : "text-slate-500 hover:text-slate-300 hover:bg-slate-900/50"
                         )}
                     >
                         {opt.icon}
@@ -33,41 +69,150 @@ function Toggle({ label, options, value, onChange }) {
     );
 }
 
+// --- LIST ITEMS (MEMOIZED) ---
+const ImageListItem = memo(({ img, index, timer, onRemove, onPromptChange }) => {
+    return (
+        <div className={cn(
+            "flex items-center gap-3 p-2 rounded-lg border transition-all text-xs group",
+            img.status === 'success' ? "bg-emerald-950/10 border-emerald-900/30 hover:border-emerald-500/30" :
+                img.status === 'error' ? "bg-red-950/10 border-red-900/30 hover:border-red-500/30" :
+                    img.status === 'processing' ? "bg-indigo-950/10 border-indigo-900/30" :
+                        img.status === 'pending' ? "bg-blue-950/10 border-blue-900/30 animate-pulse" :
+                            "bg-slate-900/20 border-white/5 hover:bg-slate-900/40 hover:border-white/10"
+        )}>
+            {/* Status Indicator / Index */}
+            <div className="w-5 flex justify-center shrink-0">
+                {img.status === 'success' ? <CheckCircle2 size={14} className="text-emerald-500/80" /> :
+                    img.status === 'error' ? <AlertCircle size={14} className="text-red-500/80" /> :
+                        <span className="text-[10px] font-mono text-slate-600 font-bold">{index + 1}</span>}
+            </div>
+
+            {/* Thumbnail */}
+            <div className="w-10 h-10 rounded bg-slate-900 flex items-center justify-center shrink-0 overflow-hidden border border-white/5 relative">
+                <img
+                    src={`file://${img.path.replace(/\\/g, '/')}`}
+                    alt={img.name}
+                    className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
+                    onError={(e) => {
+                        e.target.style.display = 'none';
+                        e.target.nextSibling.style.display = 'flex';
+                    }}
+                />
+                <div className="absolute inset-0 hidden items-center justify-center bg-slate-900 text-slate-600">
+                    <ImageIcon size={14} />
+                </div>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 min-w-0 flex flex-col gap-1">
+                <div className="text-slate-300 break-words font-medium leading-tight">{img.name}</div>
+
+                {/* Custom Prompt Input */}
+                {onPromptChange && (
+                    <input
+                        type="text"
+                        placeholder="Custom prompt..."
+                        className="w-full bg-slate-950/30 border border-white/5 rounded px-2 py-0.5 text-[10px] text-slate-400 focus:border-blue-500/50 focus:text-slate-200 focus:outline-none transition-colors"
+                        value={img.customPrompt || ''}
+                        onChange={(e) => onPromptChange(index, e.target.value)}
+                    />
+                )}
+
+                {/* Status Text for Processing */}
+                {img.status === 'processing' && (
+                    <span className="text-indigo-400 text-[9px] font-bold animate-pulse">
+                        Resizing & Enhancing...
+                    </span>
+                )}
+                {img.status === 'waiting' && (
+                    <span className="text-amber-500 text-[9px] font-bold animate-pulse">
+                        Waiting for Token...
+                    </span>
+                )}
+            </div>
+
+            {/* Timer & Delete */}
+            <div className="flex flex-col items-end gap-1.5 pl-2 border-l border-white/5">
+                {(timer?.start || img.status === 'success') && (
+                    <DurationTimer start={timer?.start} end={timer?.end} />
+                )}
+                {onRemove && (
+                    <button
+                        onClick={() => onRemove(index)}
+                        className="text-slate-600 hover:text-red-400 transition-colors p-0.5"
+                    >
+                        <X size={12} />
+                    </button>
+                )}
+            </div>
+        </div>
+    );
+});
+
+const TextListItem = memo(({ text, index, status, timer }) => {
+    return (
+        <div className={cn(
+            "flex items-center gap-3 p-2 rounded-lg border transition-all text-xs",
+            status === 'success' ? "bg-emerald-950/10 border-emerald-900/30" :
+                status === 'error' ? "bg-red-950/10 border-red-900/30" :
+                    status === 'processing' ? "bg-indigo-950/10 border-indigo-900/30" :
+                        status === 'pending' ? "bg-blue-950/10 border-blue-900/30 animate-pulse" :
+                            "bg-slate-900/20 border-white/5"
+        )}>
+            <div className="w-5 flex justify-center shrink-0">
+                {status === 'success' ? <CheckCircle2 size={14} className="text-emerald-500/80" /> :
+                    status === 'error' ? <AlertCircle size={14} className="text-red-500/80" /> :
+                        <span className="text-[10px] font-mono text-slate-600 font-bold">{index + 1}</span>}
+            </div>
+
+            <div className="flex-1 min-w-0">
+                <div className="text-slate-300 break-words whitespace-pre-wrap font-medium leading-relaxed opacity-90" title={text}>
+                    {text}
+                </div>
+                {status === 'processing' && (
+                    <div className="mt-1 text-indigo-400 text-[9px] font-bold animate-pulse">
+                        Resizing & Enhancing...
+                    </div>
+                )}
+                {status === 'waiting' && (
+                    <div className="mt-1 text-amber-500 text-[9px] font-bold animate-pulse">
+                        Waiting for Token...
+                    </div>
+                )}
+            </div>
+
+            <div className="pl-2 border-l border-white/5">
+                {(timer?.start || status === 'success') && (
+                    <DurationTimer start={timer?.start} end={timer?.end} />
+                )}
+            </div>
+        </div>
+    );
+});
+
+
 export default function Generator({ mode, logs, isHeadless }) {
     const [prompts, setPrompts] = useState('');
     const [images, setImages] = useState([]);
-    const [itemStatuses, setItemStatuses] = useState({}); // { [index]: 'pending' | 'success' | 'error' }
+    const [itemStatuses, setItemStatuses] = useState({}); // { [index]: 'pending' | 'success' | 'error' | 'processing' }
     const [itemTimers, setItemTimers] = useState({}); // { [index]: { start: number, end: number | null } }
-    const [now, setNow] = useState(Date.now());
+
+    // Removed 'now' state to prevent global re-renders
+
     const [duration, setDuration] = useState('5s');
-    const [aspectRatio, setAspectRatio] = useState('16:9'); // '16:9' | '9:16'
+    const [aspectRatio, setAspectRatio] = useState('16:9');
     const [muteAudio, setMuteAudio] = useState(false);
     const [concurrency, setConcurrency] = useState(1);
     const [isRunning, setIsRunning] = useState(false);
     const [activeAccount, setActiveAccount] = useState({ email: '-', quota: '-' });
-    // isHeadless now comes from props
-
-    // Initialize savePath from localStorage
     const [savePath, setSavePath] = useState(localStorage.getItem('lastSavePath') || '');
     const [promptFile, setPromptFile] = useState('');
-
-    // Image mode specific
-    const [imagePromptType, setImagePromptType] = useState('general'); // 'general' | 'custom'
+    const [imagePromptType, setImagePromptType] = useState('general');
     const [generalPrompt, setGeneralPrompt] = useState('');
 
     const fileInputRef = useRef(null);
     const promptFileInputRef = useRef(null);
-
-    // Live timer update
-    useEffect(() => {
-        let interval;
-        if (isRunning) {
-            interval = setInterval(() => {
-                setNow(Date.now());
-            }, 30); // 30ms for smooth 1.29s look
-        }
-        return () => clearInterval(interval);
-    }, [isRunning]);
+    const logsEndRef = useRef(null);
 
     // Listen to status
     useEffect(() => {
@@ -80,20 +225,17 @@ export default function Generator({ mode, logs, isHeadless }) {
             });
 
             window.api.receive('item-status', ({ index, status }) => {
-                console.log('Received item-status:', index, status); // DEBUG
-                // Update images state (for visual list)
+                // Update generic status map
+                setItemStatuses(prev => ({ ...prev, [index]: status }));
+
+                // Update images state if needed
                 setImages(prev => {
+                    // Optimization: Only update if changed
+                    if (!prev[index] || prev[index].status === status) return prev;
                     const newImages = [...prev];
-                    if (newImages[index]) {
-                        console.log('Updating image status for index:', index, status); // DEBUG
-                        newImages[index] = { ...newImages[index], status };
-                    } else {
-                        console.log('Image not found for index:', index); // DEBUG
-                    }
+                    newImages[index] = { ...newImages[index], status };
                     return newImages;
                 });
-                // Update generic status map (for stats)
-                setItemStatuses(prev => ({ ...prev, [index]: status }));
 
                 // Update timers
                 setItemTimers(prev => {
@@ -101,20 +243,20 @@ export default function Generator({ mode, logs, isHeadless }) {
                     let updates = {};
 
                     if (status === 'pending') {
-                        // Start timer if not already started (or restart if needed, usually just start)
+                        // Start timer
                         updates = { start: Date.now(), end: null };
-                    } else if (status === 'success' || status === 'error' || status === 'waiting') {
+                    } else if (status === 'success' || status === 'error' || status === 'waiting' || status === 'processing') {
                         // End timer
                         updates = { ...currentTimer, end: Date.now() };
                     }
-
+                    // For 'processing', we don't change the timer, it keeps running.
                     return { ...prev, [index]: { ...currentTimer, ...updates } };
                 });
             });
         }
     }, []);
 
-    const logsEndRef = useRef(null);
+    // Auto-scroll logs
     useEffect(() => {
         if (logsEndRef.current) {
             logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -122,26 +264,18 @@ export default function Generator({ mode, logs, isHeadless }) {
     }, [logs]);
 
     const handleStart = () => {
-        // Validation: Save Path must be selected
-        if (!savePath) {
-            alert('Please select a save location.');
-            return;
-        }
+        if (!savePath) { alert('Please select a save location.'); return; }
 
-        // Reset statuses
         setImages(prev => prev.map(img => ({ ...img, status: undefined })));
         setItemStatuses({});
         setItemTimers({});
 
-        // Collect prompts based on mode
         let finalPrompts = [];
         if (mode === 'text') {
             finalPrompts = prompts.split('\n').filter(p => p.trim());
-            if (finalPrompts.length === 0 && !promptFile) { alert('Please enter prompts or select a file.'); return; }
+            if (finalPrompts.length === 0 && !promptFile) { alert('Please enter prompts.'); return; }
         } else {
-            // Image Mode
             if (images.length === 0) { alert('Please select images.'); return; }
-            // If general prompt, apply to all. If custom, we assume UI handles per-image prompt (simplified here for now)
             if (imagePromptType === 'general') {
                 finalPrompts = [generalPrompt || ''];
             } else {
@@ -167,207 +301,166 @@ export default function Generator({ mode, logs, isHeadless }) {
     const handleImageUpload = (e) => {
         if (e.target.files) {
             const newImages = Array.from(e.target.files).map(f => {
-                // Try to get path via Electron API if available, else fallback to path property (older electron)
                 const realPath = window.api && window.api.getFilePath ? window.api.getFilePath(f) : f.path;
-                return {
-                    path: realPath,
-                    name: f.name,
-                    customPrompt: ''
-                };
+                return { path: realPath, name: f.name, customPrompt: '' };
             });
             setImages(prev => [...prev, ...newImages]);
         }
     };
 
-    const handlePromptUpload = (e) => {
-        if (e.target.files[0]) {
-            const file = e.target.files[0];
-            // If the file object has a path property (Electron), allow using it, otherwise fallback might differ or not be needed here.
-            // But primarily we want to read the content.
-            if (file.path) {
-                setPromptFile(file.path);
-            }
-
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                const text = event.target.result;
-                setPrompts(text);
-            };
-            reader.readAsText(file);
-        }
-        // Reset value to allow selecting same file again
-        e.target.value = '';
-    };
-
-    const getDurationDisplay = (index) => {
-        const timer = itemTimers[index];
-        if (!timer || !timer.start) return null;
-
-        const endTime = timer.end || now;
-        const durationMs = Math.max(0, endTime - timer.start);
-        const durationSec = (durationMs / 1000).toFixed(2);
-
-        return (
-            <div className="font-mono text-[10px] text-slate-400 font-bold bg-slate-900/50 px-1.5 py-0.5 rounded border border-slate-800">
-                {durationSec}s
-            </div>
-        );
+    const handlePromptChange = (index, val) => {
+        setImages(prev => {
+            const next = [...prev];
+            next[index].customPrompt = val;
+            return next;
+        });
     };
 
     return (
-        <div className="flex h-full">
+        <div className="flex h-full select-none">
             {/* LEFT SIDEBAR - CONTROLS */}
-            <div className="w-80 bg-slate-950/30 border-r border-white/5 p-6 flex flex-col gap-6 overflow-y-auto shrink-0">
+            <div className="w-[280px] bg-slate-950/40 border-r border-white/5 flex flex-col shrink-0 relative z-10">
+                <div className="p-4 flex-1 overflow-y-auto space-y-5 custom-scrollbar">
 
-                {/* File / Folder Inputs */}
-                {mode === 'text' ? (
-                    <div className="space-y-2">
-                        <label className="text-xs font-medium text-slate-400">Choose Prompt File (.txt)</label>
-                        <div className="flex gap-2">
-                            <button
-                                onClick={() => promptFileInputRef.current.click()}
-                                className="flex-1 bg-slate-900 border border-slate-700 text-slate-300 rounded-md py-2 text-xs font-medium hover:border-slate-500 hover:text-white transition-colors"
-                            >
-                                Choose File
-                            </button>
-                            <input type="file" ref={promptFileInputRef} className="hidden" accept=".txt" onChange={handlePromptUpload} />
-                        </div>
-                        {promptFile && <div className="text-[10px] text-slate-500 truncate">{promptFile}</div>}
-                    </div>
-                ) : (
-                    <div className="space-y-2">
-                        <label className="text-xs font-medium text-slate-400">Choose Images Folder</label>
-                        <div className="flex gap-2">
-                            <button
-                                onClick={() => fileInputRef.current.click()}
-                                className="flex-1 bg-slate-900 border border-slate-700 text-slate-300 rounded-md py-2 text-xs font-medium hover:border-slate-500 hover:text-white transition-colors"
-                            >
-                                Choose File
-                            </button>
-                            <input type="file" ref={fileInputRef} className="hidden" multiple accept="image/*" onChange={handleImageUpload} />
-                        </div>
-                        <div className="text-[10px] text-slate-500">{images.length} images selected</div>
-                    </div>
-                )}
-
-                {/* Text Area for General Prompt (Image Mode) or Direct Prompt (Text Mode) */}
-                {mode === 'text' ? (
-                    <div className="space-y-2 flex-1 flex flex-col">
-                        <label className="text-xs font-medium text-slate-400">
-                            Direct Prompts
-                            <span className="text-slate-600 ml-1">
-                                (Total: {prompts.split('\n').filter(p => p.trim()).length})
-                            </span>
-                        </label>
-                        <textarea
-                            value={prompts}
-                            onChange={e => setPrompts(e.target.value)}
-                            placeholder="Enter prompts here, one per line..."
-                            className="flex-1 w-full bg-slate-950/50 border border-slate-800 rounded-lg p-3 text-xs text-slate-300 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 resize-none font-mono placeholder-slate-700"
-                        />
-                    </div>
-                ) : (
-                    <div className="space-y-2">
-                        <div className="flex gap-4 mb-2">
-                            <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-                                <input type="radio" checked={imagePromptType === 'general'} onChange={() => setImagePromptType('general')} className="accent-blue-500" />
-                                General Prompt
-                            </label>
-                            <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-                                <input type="radio" checked={imagePromptType === 'custom'} onChange={() => setImagePromptType('custom')} className="accent-blue-500" />
-                                Custom Prompt
-                            </label>
-                        </div>
-                        <textarea
-                            value={generalPrompt}
-                            onChange={e => setGeneralPrompt(e.target.value)}
-                            disabled={imagePromptType !== 'general'}
-                            placeholder="General Prompt.."
-                            className={cn(
-                                "w-full h-24 bg-slate-950/50 border border-slate-800 rounded-lg p-3 text-xs text-slate-300 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 resize-none placeholder-slate-700",
-                                imagePromptType !== 'general' && "opacity-50 cursor-not-allowed"
-                            )}
-                        />
-                    </div>
-                )}
-
-                <hr className="border-white/10" />
-
-                {/* Duration - Hide in Image Mode */
-                    mode !== 'image' && (
-                        <div className="space-y-2 hidden">
-                            <label className="text-xs font-medium text-slate-400">Video Duration</label>
-                            <div className="relative">
-                                <select
-                                    value={duration}
-                                    onChange={e => setDuration(e.target.value)}
-                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-blue-500 appearance-none"
-                                >
-                                    <option value="5s">5 Seconds</option>
-                                    <option value="6s">6 Seconds</option>
-                                    <option value="7s">7 Seconds</option>
-                                    <option value="8s">8 Seconds</option>
-                                </select>
-                                <ChevronRight className="absolute right-3 top-2.5 text-slate-500 rotate-90 pointer-events-none" size={14} />
+                    {/* File / Folder Inputs */}
+                    {mode === 'text' ? (
+                        <div className="space-y-1.5">
+                            <div className="flex justify-between items-baseline">
+                                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider pl-1">Prompt File</label>
                             </div>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={() => promptFileInputRef.current.click()}
+                                    className="flex-1 bg-slate-900/50 border border-slate-700/50 hover:bg-slate-800 hover:border-slate-500 text-slate-400 hover:text-white rounded-lg py-2 text-[10px] font-semibold transition-all flex items-center justify-center gap-2 group"
+                                >
+                                    <FolderOpen size={12} className="group-hover:text-blue-400 transition-colors" />
+                                    <span>Browse .txt</span>
+                                </button>
+                                <input type="file" ref={promptFileInputRef} className="hidden" accept=".txt" onChange={e => {
+                                    if (e.target.files[0]) {
+                                        if (e.target.files[0].path) setPromptFile(e.target.files[0].path);
+                                        const reader = new FileReader();
+                                        reader.onload = (ev) => setPrompts(ev.target.result);
+                                        reader.readAsText(e.target.files[0]);
+                                    }
+                                    e.target.value = '';
+                                }} />
+                            </div>
+                            {promptFile && <div className="text-[9px] text-slate-600 px-1 truncate">{promptFile}</div>}
+                        </div>
+                    ) : (
+                        <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider pl-1">Image Source</label>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={() => fileInputRef.current.click()}
+                                    className="flex-1 bg-slate-900/50 border border-slate-700/50 hover:bg-slate-800 hover:border-slate-500 text-slate-400 hover:text-white rounded-lg py-2.5 text-[10px] font-semibold transition-all flex items-center justify-center gap-2 group"
+                                >
+                                    <Upload size={12} className="group-hover:text-blue-400 transition-colors" />
+                                    <span>Select Images</span>
+                                </button>
+                                <input type="file" ref={fileInputRef} className="hidden" multiple accept="image/*" onChange={handleImageUpload} />
+                            </div>
+                            <div className="text-[9px] text-slate-600 px-1">{images.length} images queued</div>
                         </div>
                     )}
 
-                {/* Aspect Ratio - Hide in Image Mode */}
-                {mode !== 'image' && (
-                    <Toggle
-                        label="Aspect Ratio"
-                        value={aspectRatio}
-                        onChange={setAspectRatio}
-                        options={[
-                            { value: '16:9', label: 'Landscape', icon: <Monitor size={14} /> },
-                            { value: '9:16', label: 'Portrait', icon: <Monitor size={14} className="rotate-90" /> },
-                        ]}
-                    />
-                )}
+                    {/* Prompts Input */}
+                    <div className="space-y-1.5 flex-1 flex flex-col min-h-[120px]">
+                        <div className="flex justify-between items-center px-1">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                                {mode === 'text' ? 'Prompts' : 'Instructions'}
+                            </label>
+                            {mode === 'image' && (
+                                <div className="flex gap-2">
+                                    <button onClick={() => setImagePromptType('general')} className={cn("text-[9px] font-bold transition-colors", imagePromptType === 'general' ? "text-blue-400" : "text-slate-600")}>General</button>
+                                    <div className="w-px h-3 bg-white/10"></div>
+                                    <button onClick={() => setImagePromptType('custom')} className={cn("text-[9px] font-bold transition-colors", imagePromptType === 'custom' ? "text-blue-400" : "text-slate-600")}>Custom</button>
+                                </div>
+                            )}
+                        </div>
 
-                {/* Audio Toggle */}
-                <Toggle
-                    label="Audio"
-                    value={muteAudio}
-                    onChange={setMuteAudio}
-                    options={[
-                        { value: false, label: 'Unmuted', icon: <Volume2 size={14} /> },
-                        { value: true, label: 'Muted', icon: <VolumeX size={14} /> },
-                    ]}
-                />
-
-                {/* Concurrency */}
-                <div className="space-y-4">
-                    <div className="flex justify-between items-center text-xs text-slate-400">
-                        <span className="font-semibold text-slate-300">Multi Generate</span>
-                        <span className="text-blue-400 font-bold bg-blue-500/10 px-2 py-0.5 rounded">{concurrency} Process</span>
+                        {(mode === 'text' || imagePromptType === 'general') ? (
+                            <textarea
+                                value={mode === 'text' ? prompts : generalPrompt}
+                                onChange={e => mode === 'text' ? setPrompts(e.target.value) : setGeneralPrompt(e.target.value)}
+                                placeholder={mode === 'text' ? "Enter prompts, one per line..." : "General prompt for all images..."}
+                                className="flex-1 w-full bg-slate-950/30 border border-slate-800/60 rounded-lg p-3 text-[11px] text-slate-300 focus:outline-none focus:border-blue-500/40 focus:bg-slate-900/50 resize-none font-medium leading-relaxed placeholder-slate-700 transition-all shadow-inner"
+                            />
+                        ) : (
+                            <div className="flex-1 bg-slate-950/20 border border-slate-800/30 rounded-lg flex items-center justify-center text-slate-600 text-[10px] italic p-4 text-center">
+                                Entering prompts per-image in the list →
+                            </div>
+                        )}
                     </div>
-                    <input
-                        type="range"
-                        min="1"
-                        max="5"
-                        step="1"
-                        value={concurrency}
-                        onChange={(e) => setConcurrency(parseInt(e.target.value))}
-                        className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                    />
-                    <div className="flex justify-between text-[10px] text-slate-600">
-                        <span>1 (Safe)</span>
-                        <span>5 (Max)</span>
+
+                    <div className="h-px bg-white/5 my-2" />
+
+                    {/* Settings Group */}
+                    <div className="space-y-4">
+                        {mode !== 'image' && (
+                            <>
+                                <div className="space-y-1.5">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider pl-1">Duration</label>
+                                    <div className="relative">
+                                        <select
+                                            value={duration}
+                                            onChange={e => setDuration(e.target.value)}
+                                            className="w-full bg-slate-900/50 border border-slate-700/50 rounded-lg px-3 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-blue-500 focus:bg-slate-900 appearance-none font-medium"
+                                        >
+                                            <option value="5s">5 Seconds</option>
+                                            <option value="8s">8 Seconds</option>
+                                        </select>
+                                        <ChevronRight className="absolute right-3 top-2.5 text-slate-600 rotate-90 pointer-events-none" size={12} />
+                                    </div>
+                                </div>
+                                <Toggle
+                                    label="Aspect Ratio"
+                                    value={aspectRatio}
+                                    onChange={setAspectRatio}
+                                    options={[
+                                        { value: '16:9', label: '16:9', icon: <Monitor size={12} /> },
+                                        { value: '9:16', label: '9:16', icon: <Monitor size={12} className="rotate-90" /> },
+                                    ]}
+                                />
+                            </>
+                        )}
+
+                        <Toggle
+                            label="Audio Output"
+                            value={muteAudio}
+                            onChange={setMuteAudio}
+                            options={[
+                                { value: false, label: 'On', icon: <Volume2 size={12} /> },
+                                { value: true, label: 'Mute', icon: <VolumeX size={12} /> },
+                            ]}
+                        />
+
+                        <div className="space-y-2 pt-1">
+                            <div className="flex justify-between items-baseline px-1">
+                                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Concurrency</label>
+                                <span className={cn("text-[9px] font-bold px-1.5 py-0.5 rounded", concurrency === 1 ? "bg-slate-800 text-slate-400" : "bg-blue-500/20 text-blue-400")}>{concurrency} Workers</span>
+                            </div>
+                            <input
+                                type="range"
+                                min="1"
+                                max="5"
+                                step="1"
+                                value={concurrency}
+                                onChange={(e) => setConcurrency(parseInt(e.target.value))}
+                                className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                            />
+                        </div>
                     </div>
                 </div>
 
-                <div className="mt-auto space-y-4">
-                    {/* Save Path */}
+                {/* Bottom Actions */}
+                <div className="p-4 border-t border-white/5 bg-slate-950/50 space-y-3">
                     <div className="flex gap-2">
-                        <input
-                            type="text"
-                            value={savePath}
-                            readOnly
-                            placeholder="..."
-                            className="flex-1 bg-slate-950/50 border border-slate-800 rounded-l-md px-3 py-2 text-xs text-slate-500 truncate"
-                        />
+                        <div className="flex-1 bg-slate-950/30 border border-slate-800 rounded-md px-2 py-1.5 flex items-center gap-2 overflow-hidden">
+                            <Save size={12} className="text-slate-600 shrink-0" />
+                            <div className="flex-1 text-[9px] text-slate-500 truncate font-mono" title={savePath}>{savePath || "Not selected"}</div>
+                        </div>
                         <button
                             onClick={async () => {
                                 if (window.api && window.api.invoke) {
@@ -378,176 +471,125 @@ export default function Generator({ mode, logs, isHeadless }) {
                                     }
                                 }
                             }}
-                            className="bg-slate-800 hover:bg-slate-700 text-slate-300 border border-l-0 border-slate-800 text-xs font-bold px-3 py-2 rounded-r-md transition-colors"
+                            className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold px-3 rounded-md transition-colors"
                         >
-                            Save to..
+                            Change
                         </button>
                     </div>
 
-                    {/* Generate Button */}
-                    {/* Generate / Stop Button */}
                     {isRunning ? (
                         <button
-                            onClick={() => {
-                                if (window.api) window.api.send('stop-automation');
-                            }}
-                            className="w-full py-3 rounded-lg font-bold text-sm shadow-xl transition-all flex items-center justify-center gap-2 bg-red-600 hover:bg-red-500 text-white border border-red-500 shadow-[0_0_15px_rgba(220,38,38,0.3)] hover:shadow-[0_0_20px_rgba(220,38,38,0.5)]"
+                            onClick={() => window.api && window.api.send('stop-automation')}
+                            className="w-full py-2.5 rounded-lg font-bold text-xs shadow-lg transition-all flex items-center justify-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/50"
                         >
-                            <span>Stop Generating</span>
+                            <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                            <span>STOP GENERATION</span>
                         </button>
                     ) : (
                         <button
                             onClick={handleStart}
-                            className="w-full py-3 rounded-lg font-bold text-sm shadow-xl transition-all flex items-center justify-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white border border-blue-500/50 shadow-[0_0_15px_rgba(37,99,235,0.3)] hover:shadow-[0_0_20px_rgba(37,99,235,0.5)]"
+                            className="w-full py-2.5 rounded-lg font-bold text-xs shadow-lg transition-all flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20 hover:shadow-blue-500/40 border border-blue-500/50"
                         >
-                            Run
+                            <Play size={12} fill="currentColor" />
+                            <span>START QUEUE</span>
                         </button>
                     )}
                 </div>
             </div>
 
-            {/* RIGHT CONTENT - PREVIEW / LIST */}
-            <div className="flex-1 bg-slate-950/20 p-6 flex flex-col">
-                {/* Stats Cards */}
-                <div className="grid grid-cols-4 gap-4 mb-6">
-                    <div className="bg-slate-900/50 border border-slate-700/50 rounded-lg p-3 flex flex-col items-center justify-center gap-1">
-                        <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Progress</span>
-                        <span className="text-xl font-bold text-white">
-                            {(() => {
-                                const total = mode === 'image' ? images.length : prompts.split('\n').filter(p => p.trim()).length;
-                                const finished = Object.values(itemStatuses).filter(s => s === 'success' || s === 'error').length;
-                                return `${finished} / ${total}`;
-                            })()}
+            {/* RIGHT CONTENT - LIST */}
+            <div className="flex-1 bg-slate-900/10 flex flex-col min-w-0">
+
+                {/* Status Bar */}
+                <div className="h-14 border-b border-white/5 flex items-center px-6 gap-6 bg-slate-950/20">
+                    <div className="flex flex-col">
+                        <span className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">Total</span>
+                        <span className="text-lg font-bold text-slate-200 leading-none">
+                            {mode === 'image' ? images.length : prompts.split('\n').filter(p => p.trim()).length}
                         </span>
                     </div>
-                    {/* Active Account Card */}
-                    <div className="bg-blue-950/20 border border-blue-500/30 rounded-lg p-3 flex flex-col items-center justify-center gap-1 relative overflow-hidden group">
-                        <div className="absolute inset-0 bg-blue-500/5" />
-                        <span className="text-[10px] uppercase tracking-wider text-blue-400/80 font-bold relative">Account</span>
-                        <div className="flex flex-col items-center relative z-10 w-full">
-                            <span className="text-[10px] text-slate-300 truncate max-w-full px-1" title={activeAccount.email}>{activeAccount.email}</span>
-                            {activeAccount.index && activeAccount.total && (
-                                <span className="text-[9px] text-slate-500 mt-0.5">
-                                    {activeAccount.index} / {activeAccount.total}
-                                </span>
-                            )}
-                        </div>
-                    </div>
-                    <div className="bg-slate-900/50 border border-emerald-900/30 rounded-lg p-3 flex flex-col items-center justify-center gap-1 relative overflow-hidden">
-                        <div className="absolute inset-0 bg-emerald-500/5" />
-                        <span className="text-[10px] uppercase tracking-wider text-emerald-500/80 font-bold relative">Success</span>
-                        <span className="text-xl font-bold text-emerald-400 relative">
+                    <div className="h-6 w-px bg-white/5"></div>
+                    <div className="flex flex-col">
+                        <span className="text-[9px] uppercase tracking-wider text-emerald-500/80 font-bold">Done</span>
+                        <span className="text-lg font-bold text-emerald-400 leading-none">
                             {Object.values(itemStatuses).filter(s => s === 'success').length}
                         </span>
                     </div>
-                    <div className="bg-slate-900/50 border border-red-900/30 rounded-lg p-3 flex flex-col items-center justify-center gap-1 relative overflow-hidden">
-                        <div className="absolute inset-0 bg-red-500/5" />
-                        <span className="text-[10px] uppercase tracking-wider text-red-500/80 font-bold relative">Failed</span>
-                        <span className="text-xl font-bold text-red-400 relative">
+                    <div className="h-6 w-px bg-white/5"></div>
+                    <div className="flex flex-col">
+                        <span className="text-[9px] uppercase tracking-wider text-red-500/80 font-bold">Error</span>
+                        <span className="text-lg font-bold text-red-400 leading-none">
                             {Object.values(itemStatuses).filter(s => s === 'error').length}
                         </span>
                     </div>
+
+                    <div className="ml-auto flex items-center gap-3 bg-slate-950/40 rounded-full pl-1 pr-4 py-1 border border-white/5">
+                        <div className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-[10px] font-bold border border-indigo-500/30">
+                            {activeAccount.email[0]?.toUpperCase() || '-'}
+                        </div>
+                        <div className="flex flex-col">
+                            <span className="text-[10px] font-bold text-slate-300">{activeAccount.email}</span>
+                            <span className="text-[8px] text-slate-500 font-mono">
+                                {activeAccount.index ? `Cycle #${activeAccount.index}` : 'Ready'}
+                            </span>
+                        </div>
+                    </div>
                 </div>
-                {(mode === 'image' && images.length > 0) || (mode === 'text' && prompts.split('\n').filter(p => p.trim()).length > 0) ? (
-                    <div className="flex-1 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                        {mode === 'image' ? (
+
+                {/* Main List */}
+                <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                    <div className="space-y-2 max-w-4xl mx-auto">
+                        {(mode === 'image' && images.length > 0) ? (
                             images.map((img, idx) => (
-                                <div key={idx} className={cn(
-                                    "flex items-center gap-4 p-3 rounded-lg border transition-all",
-                                    img.status === 'success' ? "bg-emerald-950/30 border-emerald-500/50" :
-                                        img.status === 'error' ? "bg-red-950/30 border-red-500/50" :
-                                            img.status === 'pending' ? "bg-slate-900/50 border-blue-500/50 animate-pulse" :
-                                                "bg-slate-900/50 border-slate-800 hover:border-slate-600"
-                                )}>
-                                    <div className="w-12 h-12 rounded bg-slate-800 flex items-center justify-center text-xs text-slate-500 shrink-0 overflow-hidden border border-slate-700 relative group">
-                                        <img
-                                            src={`file://${img.path.replace(/\\/g, '/')}`}
-                                            alt={img.name}
-                                            className="w-full h-full object-cover"
-                                            onError={(e) => {
-                                                e.target.style.display = 'none';
-                                                e.target.nextSibling.style.display = 'flex';
-                                            }}
-                                        />
-                                        <div className="absolute inset-0 hidden items-center justify-center bg-slate-800">
-                                            <ImageIcon size={14} />
-                                        </div>
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <div className="text-xs text-slate-300 truncate font-medium">{img.name}</div>
-                                        {imagePromptType === 'custom' && (
-                                            <input
-                                                type="text"
-                                                placeholder="Enter custom prompt for this image..."
-                                                className="w-full mt-1 bg-slate-950/50 border border-slate-700 rounded px-2 py-1 text-[10px] text-slate-300 focus:border-blue-500 focus:outline-none"
-                                                value={img.customPrompt}
-                                                onChange={(e) => {
-                                                    const newImages = [...images];
-                                                    newImages[idx].customPrompt = e.target.value;
-                                                    setImages(newImages);
-                                                }}
-                                            />
-                                        )}
-                                    </div>
-                                    {getDurationDisplay(idx)}
-                                    <button className="p-2 hover:bg-slate-800 rounded-md text-slate-500 hover:text-red-400 transition-colors" onClick={() => {
-                                        setImages(images.filter((_, i) => i !== idx));
-                                    }}>
-                                        ×
-                                    </button>
-                                </div>
+                                <ImageListItem
+                                    key={idx}
+                                    index={idx}
+                                    img={img}
+                                    timer={itemTimers[idx]}
+                                    onRemove={(i) => setImages(prev => prev.filter((_, x) => x !== i))}
+                                    onPromptChange={imagePromptType === 'custom' ? handlePromptChange : null}
+                                />
+                            ))
+                        ) : (mode === 'text' && prompts.split('\n').filter(p => p.trim()).length > 0) ? (
+                            prompts.split('\n').filter(p => p.trim()).map((p, idx) => (
+                                <TextListItem
+                                    key={idx}
+                                    index={idx}
+                                    text={p}
+                                    status={itemStatuses[idx]}
+                                    timer={itemTimers[idx]}
+                                />
                             ))
                         ) : (
-                            prompts.split('\n').filter(p => p.trim()).map((prompt, idx) => {
-                                const status = itemStatuses[idx];
-                                return (
-                                    <div key={idx} className={cn(
-                                        "flex items-center gap-4 p-3 rounded-lg border transition-all",
-                                        status === 'success' ? "bg-emerald-950/30 border-emerald-500/50" :
-                                            status === 'error' ? "bg-red-950/30 border-red-500/50" :
-                                                status === 'pending' ? "bg-slate-900/50 border-blue-500/50 animate-pulse" :
-                                                    "bg-slate-900/50 border-slate-800 hover:border-slate-600"
-                                    )}>
-                                        <div className="w-8 h-8 rounded bg-slate-800 flex items-center justify-center text-xs text-slate-500 shrink-0 font-mono font-bold border border-slate-700">
-                                            {idx + 1}
-                                        </div>
-                                        <div className="flex-1 min-w-0">
-                                            <div className="text-xs text-slate-300 break-words whitespace-pre-wrap font-medium" title={prompt}>
-                                                {prompt}
-                                            </div>
-                                        </div>
-                                        {getDurationDisplay(idx)}
-                                        {status === 'success' && <div className="p-2 text-emerald-500 text-xs font-bold">Done</div>}
-                                        {status === 'error' && <div className="p-2 text-red-500 text-xs font-bold">Failed</div>}
-                                        {status === 'waiting' && <div className="p-2 text-blue-400 text-xs font-bold animate-pulse">Waiting Token...</div>}
-                                        {status === 'pending' && <div className="p-2 text-amber-500 text-xs font-bold">...</div>}
-                                    </div>
-                                );
-                            })
+                            <div className="h-64 flex flex-col items-center justify-center text-slate-700 gap-3 opacity-50">
+                                <Layers size={48} strokeWidth={1} />
+                                <div className="text-xs font-medium">Queue is empty</div>
+                            </div>
                         )}
                     </div>
-                ) : (
-                    <div className="flex-1 flex flex-col items-center justify-center text-slate-600 gap-4">
-                        {/* Placeholder State */}
-                        <div className="w-16 h-16 rounded-full bg-slate-900 flex items-center justify-center shadow-inner border border-slate-800">
-                            <Layers size={32} className="opacity-20" />
-                        </div>
-                        <div className="text-sm">
-                            {mode === 'text' ? 'Ready for prompts' : 'Select images to begin'}
-                        </div>
-                    </div>
-                )}
-
-                {/* Logs Overlay */}
-                <div className="h-32 bg-slate-950/60 border-t border-white/5 p-2 overflow-y-auto font-mono text-[10px] text-slate-400">
-                    {logs.length === 0 && <div className="text-slate-600 italic">Waiting for logs...</div>}
-                    {logs.map((log, i) => (
-                        <div key={i} className="border-b border-white/5 pb-0.5 mb-0.5 last:border-0">
-                            <span className="text-slate-500">[{log.time}]</span> {log.message}
-                        </div>
-                    ))}
-                    <div ref={logsEndRef} className="h-4" /> {/* Spacer with ref */}
                 </div>
+
+                {/* Logs Drawer */}
+                <div className="bg-slate-950 border-t border-white/10 h-[140px] flex flex-col shrink-0">
+                    <div className="px-3 py-1.5 flex items-center gap-2 border-b border-white/5 bg-slate-900/20">
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
+                        <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">System Logs</span>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-2 font-mono text-[9px] space-y-0.5 custom-scrollbar">
+                        {logs.length === 0 && <div className="text-slate-700 italic px-2">Waiting for activity...</div>}
+                        {logs.map((log, i) => (
+                            <div key={i} className="text-slate-400 border-l-2 border-transparent hover:border-white/10 pl-2 py-0.5 hover:bg-white/5 transition-colors">
+                                <span className="text-slate-600 mr-2">[{log.time}]</span>
+                                <span className={cn(
+                                    log.message.includes('Error') ? "text-amber-400" :
+                                        log.message.includes('Success') ? "text-emerald-400" : "text-slate-300"
+                                )}>{log.message}</span>
+                            </div>
+                        ))}
+                        <div ref={logsEndRef} />
+                    </div>
+                </div>
+
             </div>
         </div>
     );

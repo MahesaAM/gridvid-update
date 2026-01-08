@@ -84,43 +84,69 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
 
     try {
         // Find & Click Sign In
+        // Find & Click Sign In
         const performClick = async () => {
-            try {
-                const emailSelector = 'input[type="email"]';
-                if (await page.$(emailSelector)) return null;
-
-                const frameElement = await page.$('#opal-app');
-                let frame = null;
-                if (frameElement) {
-                    logCallback("Found #opal-app iframe. Checking inside...");
-                    frame = await frameElement.contentFrame();
-                }
-
-                const searchAndClick = async (scope, scopeName) => {
-                    const loginButton = await scope.$('a[href*="accounts.google.com"]');
-                    if (loginButton) {
-                        logCallback(`Found Sign In button (href) in ${scopeName}. Clicking...`);
-                        await loginButton.click();
+            const clickStartTime = Date.now();
+            while (Date.now() - clickStartTime < 10000) { // Retry for 10s
+                try {
+                    // Check if we are already on login page (email input exists)
+                    const emailSelector = 'input[type="email"]';
+                    if (await page.$(emailSelector)) {
+                        logCallback("Already on login page (email input found).");
                         return true;
                     }
-                    const buttons = await scope.$$('button, a');
-                    for (const btn of buttons) {
-                        const t = await scope.evaluate(el => (el.textContent || el.innerText || "").trim().toLowerCase(), btn);
-                        if (t === "sign in" || t === "log in") {
-                            logCallback(`Found Sign In button ("${t}") in ${scopeName}. Clicking...`);
-                            try { await btn.click(); } catch (e) { await scope.evaluate(el => el.click(), btn); }
-                            return true;
-                        }
-                    }
-                    return false;
-                };
 
-                let clicked = await searchAndClick(page, "main page");
-                if (!clicked && frame) clicked = await searchAndClick(frame, "iframe");
-                return clicked;
-            } catch (e) {
-                logCallback("Error finding sign in button: " + e.message);
+                    const frameElement = await page.$('#opal-app');
+                    let frame = null;
+                    if (frameElement) {
+                        frame = await frameElement.contentFrame();
+                    }
+
+                    const searchAndClick = async (scope, scopeName) => {
+                        // 1. Try generic Google Sign In href
+                        const loginButton = await scope.$('a[href*="accounts.google.com"]');
+                        if (loginButton) {
+                            try {
+                                if (await scope.evaluate(el => el.offsetParent !== null, loginButton)) {
+                                    logCallback(`Found Sign In button (href) in ${scopeName}. Clicking...`);
+                                    await loginButton.click();
+                                    return true;
+                                }
+                            } catch (e) { }
+                        }
+
+                        // 2. Text Search on wider candidates
+                        const buttons = await scope.$$('button, a, div[role="button"], span[role="button"]');
+                        for (const btn of buttons) {
+                            // Skip invisible
+                            try {
+                                const visible = await scope.evaluate(el => el.offsetParent !== null, btn);
+                                if (!visible) continue;
+
+                                const t = await scope.evaluate(el => (el.textContent || el.innerText || "").trim().toLowerCase(), btn);
+                                if (t === "sign in" || t === "log in" || t === "login" || t === "masuk" || t === "sign-in") {
+                                    logCallback(`Found Sign In button ("${t}") in ${scopeName}. Clicking...`);
+                                    try { await btn.click(); } catch (e) { await scope.evaluate(el => el.click(), btn); }
+                                    return true;
+                                }
+                            } catch (e) { }
+                        }
+                        return false;
+                    };
+
+                    let clicked = await searchAndClick(page, "main page");
+                    if (!clicked && frame) clicked = await searchAndClick(frame, "iframe");
+
+                    if (clicked) return true;
+
+                    await new Promise(r => setTimeout(r, 1000));
+                } catch (e) {
+                    logCallback("Error finding sign in button: " + e.message);
+                    await new Promise(r => setTimeout(r, 1000));
+                }
             }
+            logCallback("Starting manual login check (timed out finding button)...");
+            return false;
         };
 
         const clicked = await performClick();
@@ -203,39 +229,61 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
         } catch (e) { }
 
         // Consent Loop
+        // --- ROBUST CONSENT / SPEEDBUMP HANDLER ---
         let consentClicks = 0;
         try {
             const startTime = Date.now();
-            while (Date.now() - startTime < 15000) {
+            // Extended loop to 25s to catch slow loads or multiple screens
+            while (Date.now() - startTime < 25000) {
                 if (loginPage.isClosed()) break;
 
-                const continueBtnHandle = await loginPage.evaluateHandle(() => {
-                    const buttons = Array.from(document.querySelectorAll('button, div[role="button"], span[role="button"], input[type="submit"]'));
-                    return buttons.find(b => {
-                        const t = (b.innerText || b.value || "").toLowerCase();
-                        if (t.includes("cancel") || t.includes("batal")) return false;
-                        return t === "continue" || t === "lanjutkan" || t === "next" ||
-                            t === "i agree" || t === "saya setuju" || t === "accept" || t === "allow" || t === "izinkan" ||
-                            t.includes("confirm") || t.includes("konfirmasi") ||
-                            t.includes("saya mengerti") || t.includes("i understand") || t.includes("mengerti");
-                    });
+                // 1. Check for "Early Access" BLOCK / Hard Rejection
+                try {
+                    const pageText = await loginPage.evaluate(() => document.body.innerText.toLowerCase());
+                    if (pageText.includes("early access") && (pageText.includes("doesn't have access") || pageText.includes("tidak memiliki akses"))) {
+                        throw new Error("Account Blocked: Early Access Denied (Need Waiting List).");
+                    }
+                } catch (e) { if (e.message.includes("Account Blocked")) throw e; }
+
+                // 2. Click Consent Buttons
+                const btnClicked = await loginPage.evaluate(() => {
+                    // Broader list of keywords
+                    const keywords = [
+                        "continue", "lanjutkan", "next", "berikutnya",
+                        "i agree", "saya setuju", "accept", "allow", "izinkan",
+                        "confirm", "konfirmasi", "i understand", "saya mengerti", "mengerti", "paham",
+                        "yes, i'm in", "ya, saya ikut", "no, thanks", "jangan sekarang", "not now",
+                        "got it", "oke"
+                    ];
+
+                    const candidates = Array.from(document.querySelectorAll('button, input[type="submit"], div[role="button"], span[role="button"]'));
+
+                    for (const btn of candidates) {
+                        // Ignore hidden elements
+                        if (btn.offsetParent === null) continue;
+
+                        const t = (btn.innerText || btn.value || "").toLowerCase().trim();
+                        // Exact match or includes for longer sentences
+                        if (keywords.some(k => t === k || (t.length < 30 && t.includes(k)))) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
                 });
 
-                if (continueBtnHandle && continueBtnHandle.asElement()) {
-                    try {
-                        await loginPage.evaluate(el => el.click(), continueBtnHandle);
-                    } catch (errClick) {
-                        if (errClick.message.includes('Execution context was destroyed')) break;
-                    }
-
+                if (btnClicked) {
                     consentClicks++;
-                    if (consentClicks > 5) break;
-                    await new Promise(r => setTimeout(r, 3000));
+                    logCallback(`Clicked consent/interstitial button. (Click #${consentClicks})`);
+                    await new Promise(r => setTimeout(r, 2000)); // Wait for nav
                 } else {
                     await new Promise(r => setTimeout(r, 1000));
                 }
             }
-        } catch (e) { }
+        } catch (e) {
+            if (e.message.includes("Account Blocked")) throw e;
+            // Otherwise ignore regex errors
+        }
 
     } catch (e) {
         logCallback("Auto-login logic error: " + e.message);
@@ -623,60 +671,63 @@ async function getImageDimensions(imagePath) {
     });
 }
 
-async function resizeVideo(videoPath, targetWidth, targetHeight, logCallback) {
+async function processVideo(videoPath, targetWidth, targetHeight, muteAudio, logCallback) {
     if (!ffmpeg) return videoPath;
 
     // Fix for libx264: Width and height must be divisible by 2.
-    // We strictly enforce this to prevent ffmpeg errors.
     const safeWidth = targetWidth % 2 === 0 ? targetWidth : targetWidth + 1;
     const safeHeight = targetHeight % 2 === 0 ? targetHeight : targetHeight + 1;
 
     if (safeWidth !== targetWidth || safeHeight !== targetHeight) {
-        logCallback(`Adjusting target resolution to even numbers: ${safeWidth}x${safeHeight} (from ${targetWidth}x${targetHeight})`);
+        logCallback(`Adjusting target resolution to even numbers: ${safeWidth}x${safeHeight}`);
     }
 
     return new Promise((resolve, reject) => {
-        const outputPath = videoPath.replace('.mp4', '_resized.mp4');
-        logCallback(`Resizing video to ${safeWidth}x${safeHeight} (Crop-to-Fill)...`);
+        const outputPath = videoPath.replace('.mp4', '_processed.mp4');
+        logCallback(`Processing video: Resize(${safeWidth}x${safeHeight}) + Sharpen + ${muteAudio ? 'Mute' : 'Audio Copy'}...`);
 
-        // "Zoom to Fill" / "Cover" Logic:
-        // scale=max(fw\,iw*fh/ih):max(fh\,ih*fw/iw)
-        // Then crop=fw:fh
-        // This scales the video so it fully covers the target box, maintaining aspect ratio, then crops the center.
-        // We use 'iw' (input width) and 'ih' (input height) variables in ffmpeg.
+        // Filter Logic:
+        // 1. Scale & Crop (Zoom to Fill)
+        // 2. Unsharp Mask (Sharpen)
         const scaleFilter = `scale=max(${safeWidth}\\,iw*${safeHeight}/ih):max(${safeHeight}\\,ih*${safeWidth}/iw)`;
         const cropFilter = `crop=${safeWidth}:${safeHeight}`;
+        const sharpenFilter = `unsharp=5:5:1.0:5:5:0.0`; // Default sharpening
 
-        ffmpeg(videoPath)
-            // Using complex filter for more advanced logic
-            .complexFilter([
-                `${scaleFilter}[scaled]`,
-                `[scaled]${cropFilter}[cropped]`
-            ], 'cropped')
-            // Ensure compatibility
+        const complexFilter = `[0:v]${scaleFilter},${cropFilter},${sharpenFilter}[outv]`;
+
+        let command = ffmpeg(videoPath)
+            .complexFilter(complexFilter, 'outv')
             .outputOptions('-c:v libx264')
-            .outputOptions('-c:a copy')
+            .outputOptions('-preset ultrafast') // Optimization: Fast encoding
+            .outputOptions('-crf 23'); // Reasonable quality
+
+        if (muteAudio) {
+            command.outputOptions('-an'); // Remove audio
+        } else {
+            command.outputOptions('-c:a copy'); // Copy audio if present
+        }
+
+        command
             .save(outputPath)
             .on('end', () => {
                 try {
                     fs.unlinkSync(videoPath);
                     fs.renameSync(outputPath, videoPath);
-                    logCallback("Video resized (Zoom-to-Fill) successfully.");
+                    logCallback("Video processing (Resize/Sharpen) complete.");
                     resolve(videoPath);
                 } catch (e) {
                     reject(e);
                 }
             })
             .on('error', (err) => {
-                logCallback(`Error resizing video: ${err.message}`);
-                // More detailed ffmpeg error might be available in err.stderr
+                logCallback(`Error processing video: ${err.message}`);
                 if (err.stderr) logCallback(`FFmpeg Stderr: ${err.stderr}`);
                 reject(err);
             });
     });
 }
 
-async function downloadVideoFile(url, authToken, savePath, filenameId, logCallback, muteAudio = false, referenceImagePath = null) {
+async function downloadVideoFile(url, authToken, savePath, filenameId, logCallback, muteAudio = false, referenceImagePath = null, onProcessingStart = null) {
     if (!fs.existsSync(savePath)) {
         fs.mkdirSync(savePath, { recursive: true });
     }
@@ -710,39 +761,34 @@ async function downloadVideoFile(url, authToken, savePath, filenameId, logCallba
 
         logCallback("Download complete.");
 
-        // 1. Resize if needed (Priority over audio stripping to avoid stripping then re-encoding audio?)
-        // Actually, order matters slightly. 
-        // If we resize first, we re-encode video. Audio is copied.
-        // If we strip audio first, we have silent video. Then we resize.
-        // Let's do Resize FIRST, then Mute. Or Mute then Resize.
-        // If we mute first, simpler.
-
-        let currentPath = filePath;
-
         if (referenceImagePath && fs.existsSync(referenceImagePath)) {
-            logCallback(`Checking resolution match against: ${path.basename(referenceImagePath)}`);
             try {
                 const dims = await getImageDimensions(referenceImagePath);
                 if (dims) {
+                    if (onProcessingStart) onProcessingStart(); // Notify UI we are starting heavy work
+
                     logCallback(`Target Resolution: ${dims.width}x${dims.height}`);
-                    currentPath = await resizeVideo(currentPath, dims.width, dims.height, logCallback);
-                } else {
-                    logCallback("Could not detect image dimensions. Skipping resize.");
+                    await processVideo(filePath, dims.width, dims.height, muteAudio, logCallback);
+                    return filePath;
                 }
             } catch (e) {
-                logCallback(`Resize warning: ${e.message}`);
+                logCallback(`Resize/Processing warning: ${e.message}`);
             }
         }
 
+        // Fallback: If no resize needed (Text-to-Video mode), but Mute IS requested
         if (muteAudio) {
-            try {
-                await stripAudio(currentPath, logCallback);
-            } catch (e) {
-                logCallback(`Warning: Failed to strip audio: ${e.message}`);
+            // We can use the simple stripAudio or just re-use processVideo without resize? 
+            // Providing null/null for dims might break logic.
+            // Let's keep the simple stripAudio logic for non-resize cases (Text Mode) or just use ffmpeg simplistically.
+            // For consistency and speed, lets just use a simple -an command if we have ffmpeg.
+            if (ffmpeg) {
+                if (onProcessingStart) onProcessingStart();
+                await stripAudio(filePath, logCallback);
             }
         }
 
-        return currentPath;
+        return filePath;
     } catch (error) {
         logCallback("Error downloading: " + error.message);
         throw error;

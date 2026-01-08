@@ -35,18 +35,24 @@ class AccountPool {
             ...a,
             busy: false,
             status: 'ok',
-            lastUsed: 0
+            lastUsed: 0,
+            cooldownUntil: 0 // [NEW] Timestamp when account is ready again
         }));
     }
 
     /**
      * Get the best available account.
-     * Criteria: Status is 'ok', not busy.
+     * Criteria: Status is 'ok', not busy, AND cooldown has expired.
      * Sorts by lastUsed ASC so we get the one that has been idle the longest.
      */
     acquire() {
         const now = Date.now();
-        const candidates = this.accounts.filter(a => a.status === 'ok' && !a.busy);
+        // Filter: OK, Not Busy, Cooldown Passed
+        const candidates = this.accounts.filter(a =>
+            a.status === 'ok' &&
+            !a.busy &&
+            a.cooldownUntil <= now
+        );
 
         if (candidates.length === 0) return null;
 
@@ -61,12 +67,19 @@ class AccountPool {
 
     /**
      * Release an account back to the pool.
+     * @param {string} email 
+     * @param {string|null} newStatus 
+     * @param {number} cooldownSeconds - How long to block this account (in seconds)
      */
-    release(email, newStatus = null) {
+    release(email, newStatus = null, cooldownSeconds = 0) {
         const acc = this.accounts.find(a => a.email === email);
         if (acc) {
             acc.busy = false; // Unlock
             if (newStatus) acc.status = newStatus;
+
+            if (cooldownSeconds > 0) {
+                acc.cooldownUntil = Date.now() + (cooldownSeconds * 1000);
+            }
         }
     }
 
@@ -80,11 +93,17 @@ class AccountPool {
 
     getStats() {
         const total = this.accounts.length;
+        const now = Date.now();
         const ok = this.accounts.filter(a => a.status === 'ok').length;
+        // Busy includes cooldowns effectively? No, busy is active processing.
+        // Let's count cooldowns separately.
+        const cooling = this.accounts.filter(a => a.status === 'ok' && !a.busy && a.cooldownUntil > now).length;
+        const available = this.accounts.filter(a => a.status === 'ok' && !a.busy && a.cooldownUntil <= now).length;
         const busy = this.accounts.filter(a => a.busy).length;
         const limited = this.accounts.filter(a => a.status === 'limited').length;
         const error = this.accounts.filter(a => a.status === 'error').length;
-        return { total, ok, busy, limited, error };
+
+        return { total, available, cooling, busy, limited, error };
     }
 
     getTotalCount() {
@@ -92,7 +111,8 @@ class AccountPool {
     }
 
     getAvailableCount() {
-        return this.accounts.filter(a => a.status === 'ok' && !a.busy).length;
+        const now = Date.now();
+        return this.accounts.filter(a => a.status === 'ok' && !a.busy && a.cooldownUntil <= now).length;
     }
 }
 
@@ -158,7 +178,7 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
                 const stats = pool.getStats();
                 // Avoid spamming logs too much, maybe only log every 5th retry? 
                 // For now, let's log once per wait cycle is fine if wait is 2s.
-                logCallback(`[Worker ${workerId}] Waiting for account... (Pool: OK=${stats.ok}, Busy=${stats.busy}, Ltd=${stats.limited}, Err=${stats.error})`);
+                logCallback(`[Worker ${workerId}] Waiting for account... (Avail=${stats.available}, Cooling=${stats.cooling}, Busy=${stats.busy})`);
                 await new Promise(r => setTimeout(r, 2000));
                 continue;
             }
@@ -251,7 +271,16 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
 
                         if (browser.isConnected()) {
                             const dlDir = savePath || path.join(process.env.USERPROFILE || process.env.HOME || __dirname, 'Downloads');
-                            await downloadVideoFile(downloadUrl, authToken, dlDir, blobId, (msg) => logCallback(`[${currentAccount.email}] ${msg}`), muteAudio, currentItem.imagePath);
+                            await downloadVideoFile(
+                                downloadUrl,
+                                authToken,
+                                dlDir,
+                                blobId,
+                                (msg) => logCallback(`[${currentAccount.email}] ${msg}`),
+                                muteAudio,
+                                currentItem.imagePath,
+                                () => statusCallback(currentItem.index, 'processing') // onProcessingStart
+                            );
                             statusCallback(currentItem.index, 'success');
                             completedCount++;
                         } else {
@@ -334,8 +363,44 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
                 }
                 // Release account
                 if (currentAccount) {
-                    pool.release(currentAccount.email, accountStatus);
-                    logCallback(`[Worker ${workerId}] Released account: ${currentAccount.email} (Status: ${accountStatus})`);
+                    let cooldown = 0;
+
+                    // Logic to determine cooldown
+                    // If no explicit status change (status is 'ok'), but we perhaps had a soft error?
+                    // We can track if we successfully generated an item. 
+                    // Actually, let's look at the Error message or local variables.
+                    // Ideally we should have set a flag. But for now, let's say:
+                    // If accountStatus is 'ok' but we crashed/errored out early, maybe add short cooldown?
+                    // But if we just finished normally, cooldown = 0.
+
+                    // If we are releasing with 'error' or 'limited', cooldown doesn't matter (it's dead).
+                    // If we are releasing with 'ok', we check if it was a soft error.
+                    // The 'worker' function local variables are tricky to pass here cleanly without refactor.
+                    // Let's assume the catch block handles the decision.
+
+                    // Hack: We can change accountStatus to 'cooldown' temporarily? No, status is perma-state.
+                    // Let's rely on the error catch block to set a var.
+
+                    // Re-reading catch block:
+                    // Soft Timeout -> accountStatus = 'ok'
+                    // Failed to auth -> accountStatus = 'ok'
+
+                    // If we failed to auth, we DEFINITELY want a cooldown.
+                    // Let's default to 0. 
+
+                    // IMPROVEMENT: Check if queue item was NOT processed successfully?
+                    // If we are breaking the loop and releasing, and we didn't finish cleanly...
+                    // Let's use a heuristic: if browser is closed due to error, apply 60s cooldown.
+
+                    // We can check if 'authToken' was ever obtained. 
+                    if (!authToken && accountStatus === 'ok') {
+                        cooldown = 60; // 60s cooldown if we failed to get token
+                    }
+
+                    pool.release(currentAccount.email, accountStatus, cooldown);
+
+                    const cooldownMsg = cooldown > 0 ? ` (Cooldown: ${cooldown}s)` : "";
+                    logCallback(`[Worker ${workerId}] Released account: ${currentAccount.email} (Status: ${accountStatus}${cooldownMsg})`);
                 }
             }
         }
