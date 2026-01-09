@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { getOpalFrame } = require('./common-utils');
+const { getOpalFrame, clearAndType } = require('./common-utils');
 
 const { execFile } = require('child_process');
 
@@ -257,7 +257,8 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
             try {
                 await loginPage.waitForSelector(emailSelector, { visible: true, timeout: 5000 });
                 logCallback(`Auto-filling email: ${accountEmail}`);
-                await loginPage.type(emailSelector, accountEmail, { delay: 50 });
+                logCallback(`Auto-filling email: ${accountEmail}`);
+                await clearAndType(loginPage, emailSelector, accountEmail);
                 await new Promise(r => setTimeout(r, 500));
                 const nextButtonSelector = '#identifierNext button';
                 const nextBtn = await loginPage.$(nextButtonSelector);
@@ -270,7 +271,8 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
                 await loginPage.waitForSelector(passwordSelector, { visible: true, timeout: 8000 });
                 await new Promise(r => setTimeout(r, 1000));
                 logCallback("Auto-filling password...");
-                await loginPage.type(passwordSelector, accountPassword, { delay: 50 });
+                logCallback("Auto-filling password...");
+                await clearAndType(loginPage, passwordSelector, accountPassword);
                 await new Promise(r => setTimeout(r, 500));
                 const passwordNextSelector = '#passwordNext button';
                 const pwNextBtn = await loginPage.$(passwordNextSelector);

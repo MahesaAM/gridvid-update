@@ -23,99 +23,202 @@ function stopGenerate() {
 }
 
 /**
- * AccountPool manages the distribution of Google accounts to workers.
- * Features:
- * - Smart Rotation: Hand out the Least Recently Used (LRU) account to balance load.
- * - Locking: Marks accounts as 'busy' so multiple workers don't grab the same one.
- * - Status Tracking: Tracks 'ok', 'limited', 'error' states.
+ * TokenPool: Manages a collection of valid tokens.
+ * Thread-safe-ish (JS single threaded event loop makes array push/pop safe).
  */
-class AccountPool {
-    constructor(accounts) {
-        this.accounts = accounts.map(a => ({
-            ...a,
-            busy: false,
-            status: 'ok',
-            lastUsed: 0,
-            usageCount: 0, // [NEW] Track generations per session
-            cooldownUntil: 0 // [NEW] Timestamp when account is ready again
-        }));
+class TokenPool {
+    constructor() {
+        this.tokens = []; // { email, token }
+        this.waitingResolvers = [];
     }
 
-    /**
-     * Get the best available account.
-     * Criteria: Status is 'ok', not busy, AND cooldown has expired.
-     * Sorts by lastUsed ASC so we get the one that has been idle the longest.
-     */
-    acquire() {
-        const now = Date.now();
-        // Filter: OK, Not Busy, Cooldown Passed
-        const candidates = this.accounts.filter(a =>
-            a.status === 'ok' &&
-            !a.busy &&
-            a.cooldownUntil <= now
-        );
-
-        if (candidates.length === 0) return null;
-
-        // Sort by lastUsed ASC (smallest timestamp = oldest usage = least recently used)
-        candidates.sort((a, b) => a.lastUsed - b.lastUsed);
-
-        const selected = candidates[0];
-        selected.busy = true;
-        selected.lastUsed = now;
-        return selected;
+    addToken(email, token) {
+        console.log(`[TokenPool] Adding token for ${email}`);
+        this.tokens.push({ email, token });
+        this.notify();
     }
 
-    /**
-     * Release an account back to the pool.
-     * @param {string} email 
-     * @param {string|null} newStatus 
-     * @param {number} cooldownSeconds - How long to block this account (in seconds)
-     */
-    release(email, newStatus = null, cooldownSeconds = 0) {
-        const acc = this.accounts.find(a => a.email === email);
-        if (acc) {
-            acc.busy = false; // Unlock
-            if (newStatus) acc.status = newStatus;
+    // Returns a Promise that resolves with a token when available
+    async acquire() {
+        if (this.tokens.length > 0) {
+            return this.tokens.shift();
+        }
 
-            if (cooldownSeconds > 0) {
-                acc.cooldownUntil = Date.now() + (cooldownSeconds * 1000);
-            }
+        // Wait for token
+        return new Promise(resolve => {
+            this.waitingResolvers.push(resolve);
+        });
+    }
+
+    notify() {
+        while (this.tokens.length > 0 && this.waitingResolvers.length > 0) {
+            const resolver = this.waitingResolvers.shift();
+            const tokenData = this.tokens.shift();
+            resolver(tokenData);
         }
     }
 
-    /**
-     * Check if there are ANY accounts that are theoretically usable (even if currently busy).
-     * If false, it means all accounts are banned or limited.
-     */
-    hasViableAccounts() {
-        return this.accounts.some(a => a.status === 'ok');
-    }
-
-    getStats() {
-        const total = this.accounts.length;
-        const now = Date.now();
-        const ok = this.accounts.filter(a => a.status === 'ok').length;
-        // Busy includes cooldowns effectively? No, busy is active processing.
-        // Let's count cooldowns separately.
-        const cooling = this.accounts.filter(a => a.status === 'ok' && !a.busy && a.cooldownUntil > now).length;
-        const available = this.accounts.filter(a => a.status === 'ok' && !a.busy && a.cooldownUntil <= now).length;
-        const busy = this.accounts.filter(a => a.busy).length;
-        const limited = this.accounts.filter(a => a.status === 'limited').length;
-        const error = this.accounts.filter(a => a.status === 'error').length;
-
-        return { total, available, cooling, busy, limited, error };
-    }
-
-    getTotalCount() {
-        return this.accounts.length;
-    }
-
-    getAvailableCount() {
-        const now = Date.now();
-        return this.accounts.filter(a => a.status === 'ok' && !a.busy && a.cooldownUntil <= now).length;
+    hasTokens() {
+        return this.tokens.length > 0;
     }
 }
+
+/**
+ * TokenHarvester (Producer)
+ * Logs into accounts sequentially and pushes tokens to the pool.
+ */
+async function runTokenHarvest(accounts, tokenPool, logCallback, muteAudio, headless) {
+    logCallback({ key: 'auth', message: 'Starting Token Harvester...' });
+
+    for (const account of accounts) {
+        if (isStopped) break;
+
+        logCallback({ key: 'auth', message: `[${account.email}] Harvesting token...` });
+
+        // TODO: Check if we already have a valid token in memory? 
+        // For now, let's assume we need to check login state or refresh.
+        // Optimization: If we just got a token for this email recently, skip.
+
+        let browser = null;
+        try {
+            const launchArgs = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-infobars',
+                '--window-size=1280,800',
+                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ];
+            if (muteAudio) launchArgs.push('--mute-audio');
+
+            browser = await puppeteer.launch({
+                headless: headless ? 'new' : false,
+                executablePath: getChromiumPath(),
+                userDataDir: path.join(app.getPath('userData'), 'profiles', sanitize(account.email)),
+                args: launchArgs,
+                ignoreDefaultArgs: ['--enable-automation']
+            });
+
+            const page = await browser.newPage();
+
+            // Log callback wrapper for Auth logs
+            const authLogger = (msg) => logCallback({ key: 'auth', message: `[${account.email}] ${msg}` });
+
+            const authToken = await getAuthTokenFromPage(page, authLogger, account.email, account.password);
+
+            if (authToken) {
+                logCallback({ key: 'auth', message: `[${account.email}] ✅ Token Aquired.` });
+                tokenPool.addToken(account.email, authToken);
+            } else {
+                logCallback({ key: 'auth', message: `[${account.email}] ❌ Failed to get token.` });
+            }
+
+        } catch (e) {
+            logCallback({ key: 'auth', message: `[${account.email}] Error: ${e.message}` });
+        } finally {
+            if (browser) {
+                try { await browser.close(); } catch (e) { }
+            }
+        }
+    }
+    logCallback({ key: 'auth', message: 'Token Harvest Loop Finished.' });
+}
+
+/**
+ * GeneratorWorker (Consumer)
+ * Consumes tokens to generate videos.
+ */
+async function runGeneratorWorker(workerId, queue, tokenPool, logCallback, statusCallback, savePath, duration, aspectRatio, muteAudio) {
+    logCallback({ key: 'gen', message: `[Worker ${workerId}] Started.` });
+
+    while (queue.length > 0 && !isStopped) {
+        // 1. Acquire Token (Wait if needed)
+        // If queue is empty, break (handled by while)
+        // If stopped, break
+
+        // We peek to see if we should even wait. 
+        if (queue.length === 0) break;
+
+        logCallback({ key: 'gen', message: `[Worker ${workerId}] Waiting for available token...` });
+        const { email, token } = await tokenPool.acquire();
+
+        // 2. We have a token! Grab work.
+        if (queue.length === 0) {
+            tokenPool.addToken(email, token); // Return unused token
+            break;
+        }
+
+        const currentItem = queue.shift();
+
+        const label = currentItem.imagePath ? `Image ${path.basename(currentItem.imagePath)}` : `"${currentItem.text.substring(0, 15)}..."`;
+        logCallback({ key: 'gen', message: `[Worker ${workerId}] Processing with ${email}: ${label}` });
+        statusCallback(currentItem.index, 'pending');
+
+        try {
+            // Log wrapper for Gen logs
+            const genLogger = (msg) => logCallback({ key: 'gen', message: `[${email}] ${msg}` });
+
+            const { downloadUrl, blobId } = await generateVideoAPI(
+                token,
+                currentItem.text,
+                aspectRatio,
+                genLogger,
+                currentItem.imagePath,
+                duration
+            );
+
+            if (isStopped) throw new Error("Stopped by user");
+
+            const dlDir = savePath || path.join(process.env.USERPROFILE || process.env.HOME || __dirname, 'Downloads');
+
+            await downloadVideoFile(
+                downloadUrl,
+                token,
+                dlDir,
+                blobId,
+                genLogger,
+                muteAudio,
+                currentItem.imagePath,
+                () => statusCallback(currentItem.index, 'processing')
+            );
+
+            statusCallback(currentItem.index, 'success');
+
+            // Success! Return valid token to pool for reuse.
+            tokenPool.addToken(email, token);
+
+        } catch (err) {
+            const errMsg = err.message || "";
+            if (errMsg === "Stopped by user") {
+                statusCallback(currentItem.index, 'pending');
+                tokenPool.addToken(email, token);
+                return;
+            }
+
+            // Check for fatal token errors (Auth or Quota)
+            // 429 is usually Too Many Requests (Quota)
+            const isTokenDead = errMsg.includes("401") ||
+                errMsg.includes("403") ||
+                errMsg.includes("Auth") ||
+                errMsg.includes("limit") ||
+                errMsg.includes("quota") ||
+                errMsg.toLowerCase().includes("exceeded");
+
+            if (isTokenDead) {
+                logCallback({ key: 'gen', message: `[${email}] 🛑 Account exhausted / Quota Limit. Discarding.` });
+                statusCallback(currentItem.index, 'waiting');
+                queue.unshift(currentItem); // Retry with another account
+            } else {
+                logCallback({ key: 'gen', message: `[${email}] ⚠️ Error: ${errMsg}. Retrying...` });
+                tokenPool.addToken(email, token); // Return token (transient error likely)
+                statusCallback(currentItem.index, 'waiting');
+                queue.unshift(currentItem); // Retry same item
+            }
+        }
+    }
+    logCallback({ key: 'gen', message: `[Worker ${workerId}] Finished.` });
+}
+
 
 async function runGenerate(params, logCallback, statusCallback, accountCallback) {
     isStopped = false;
@@ -123,14 +226,19 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
     const mode = params.mode ? params.mode.toLowerCase() : 'text';
     const headless = params.headless !== undefined ? params.headless : true;
 
-    console.log('[Generator] Received params:', JSON.stringify(params, null, 2));
-    logCallback('Starting automation...');
-    logCallback(`Mode: ${mode.toUpperCase()}`);
-    logCallback(`Concurrency Request: ${concurrency}`);
-    logCallback(`Accounts Provided: ${accounts ? accounts.length : 0}`);
+    // Adapting logCallback to handle old string inputs if any legacy calls remain
+    const safeLog = (data) => {
+        if (typeof data === 'string') {
+            logCallback({ key: 'system', message: data });
+        } else {
+            logCallback(data);
+        }
+    };
+
+    safeLog('Starting automation (Producer-Consumer Mode)...');
 
     if (!accounts || accounts.length === 0) {
-        logCallback('No accounts available. Please add accounts first.');
+        safeLog('No accounts available. Please add accounts first.');
         return;
     }
 
@@ -145,281 +253,41 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
                 imagePath: imgPath,
                 index: i
             }));
-        } else {
-            logCallback("No images provided for image mode.");
-            return;
         }
     } else {
-        // Text/Veo Mode
         queue = prompts.map((p, i) => ({ text: p, index: i }));
     }
-    logCallback(`Total items in queue: ${queue.length}`);
-    const totalItems = queue.length;
-    let completedCount = 0;
 
-    // 2. Initialize Account Pool
-    const pool = new AccountPool(accounts);
+    // 2. Initialize Components
+    const tokenPool = new TokenPool();
 
-    // 3. Worker Function
-    const worker = async (workerId) => {
-        logCallback(`[Worker ${workerId}] Started.`);
+    // 3. Start Harvester (Producer) - runs in background
+    // We DON'T await this yet, it runs totally parallel filling the pool.
+    const harvesterPromise = runTokenHarvest(accounts, tokenPool, safeLog, muteAudio, headless);
 
-        while (queue.length > 0 && !isStopped) {
-            // A. Check viability
-            if (!pool.hasViableAccounts()) {
-                logCallback(`[Worker ${workerId}] All accounts exhausted/limited. Exiting.`);
-                break;
-            }
-
-            // B. Acquire Account
-            const currentAccount = pool.acquire();
-
-            if (!currentAccount) {
-                // No accounts available right now (all busy). Wait.
-                const stats = pool.getStats();
-                // Avoid spamming logs too much, maybe only log every 5th retry? 
-                // For now, let's log once per wait cycle is fine if wait is 2s.
-                // logCallback(`[Worker ${workerId}] Waiting...`); // Too spammy
-                await new Promise(r => setTimeout(r, 2000));
-                continue;
-            }
-
-            // C. Use Account
-            logCallback(`[Worker ${workerId}] Acquired account: ${currentAccount.email}`);
-
-            // Find index for UI callback
-            const accountInd = accounts.findIndex(a => a.email === currentAccount.email);
-            if (accountCallback) accountCallback({
-                email: currentAccount.email,
-                index: accountInd + 1,
-                total: accounts.length,
-                usage: currentAccount.usageCount,
-                limit: 10
-            });
-
-            let browser = null;
-            let page = null;
-            let authToken = null;
-            let accountStatus = 'ok'; // default status to release with
-
-            try {
-                const launchArgs = [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-infobars',
-                    '--window-size=1280,800',
-                    '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                ];
-                if (muteAudio) launchArgs.push('--mute-audio');
-
-                browser = await puppeteer.launch({
-                    headless: headless ? 'new' : false,
-                    executablePath: getChromiumPath(),
-                    userDataDir: path.join(app.getPath('userData'), 'profiles', sanitize(currentAccount.email)),
-                    args: launchArgs,
-                    ignoreDefaultArgs: ['--enable-automation']
-                });
-
-                page = await browser.newPage();
-
-                // Mute Handling
-                if (muteAudio) {
-                    await page.evaluateOnNewDocument(() => {
-                        window.addEventListener('load', () => {
-                            const muteAll = () => document.querySelectorAll('audio, video').forEach(el => { el.muted = true; el.volume = 0; });
-                            muteAll();
-                            new MutationObserver(muteAll).observe(document.body, { childList: true, subtree: true });
-                        });
-                    });
-                }
-
-                authToken = await getAuthTokenFromPage(page, (msg) => {
-                    // Filter Login Logs
-                    if (msg.includes('Auto-filling') || msg.includes('Found Sign In') || msg.includes('Detected')) return;
-                    if (msg.includes('TOKEN FOUND')) logCallback(`[${currentAccount.email}] Login successful.`);
-                    // logCallback(`[${currentAccount.email}] ${msg}`); // verbose
-                }, currentAccount.email, currentAccount.password);
-
-                if (!authToken) {
-                    throw new Error("Failed to authenticate.");
-                }
-
-                // D. Process ONE Item (Strict Rotation)
-                // We assume queue > 0 because of outer loop check.
-                const currentItem = queue.shift();
-
-                statusCallback(currentItem.index, 'pending');
-                const label = currentItem.imagePath ? `Image ${path.basename(currentItem.imagePath)}` : `"${currentItem.text.substring(0, 15)}..."`;
-                logCallback(`[${currentAccount.email}] Processing (${currentItem.index + 1}): ${label}`);
-
-                try {
-                    const { downloadUrl, blobId } = await generateVideoAPI(
-                        authToken,
-                        currentItem.text,
-                        aspectRatio,
-                        (msg) => {
-                            // Simplified Log Filter
-                            if (msg.includes('Generatng') || msg.includes('Success') || msg.includes('Error')) {
-                                logCallback(`[${currentAccount.email}] ${msg}`);
-                            }
-                        },
-                        currentItem.imagePath,
-                        duration
-                    );
-
-                    if (isStopped) throw new Error("Stopped by user");
-
-                    if (browser.isConnected()) {
-                        const dlDir = savePath || path.join(process.env.USERPROFILE || process.env.HOME || __dirname, 'Downloads');
-                        await downloadVideoFile(
-                            downloadUrl,
-                            authToken,
-                            dlDir,
-                            blobId,
-                            (msg) => {
-                                if (msg.includes('Download') || msg.includes('Processing')) logCallback(`[${currentAccount.email}] ${msg}`);
-                            },
-                            muteAudio,
-                            currentItem.imagePath,
-                            () => statusCallback(currentItem.index, 'processing')
-                        );
-                        statusCallback(currentItem.index, 'success');
-                        completedCount++;
-                        currentAccount.usageCount++;
-
-                        // Soft Limit Check
-                        if (currentAccount.usageCount >= 10) {
-                            logCallback(`[${currentAccount.email}] Daily limit (10) reached.`);
-                            accountStatus = 'limited';
-                        }
-                    } else {
-                        throw new Error("Browser disconnected.");
-                    }
-
-                } catch (err) {
-                    const errMsg = err.message || "";
-                    if (errMsg === "Stopped by user") {
-                        statusCallback(currentItem.index, 'error');
-                        throw err;
-                    }
-
-                    if (errMsg.includes("Sensitive Content")) {
-                        logCallback(`[${currentAccount.email}] 🛑 Safety Reset.`);
-                        statusCallback(currentItem.index, 'error');
-                        // No queue unshift for safety violation, skip it
-                    } else if (errMsg.includes("429") || errMsg.includes("403") || errMsg.includes("limit") || errMsg.includes("quota")) {
-                        logCallback(`[${currentAccount.email}] 🛑 Limit Reached.`);
-                        statusCallback(currentItem.index, 'waiting');
-                        queue.unshift(currentItem);
-                        accountStatus = 'limited';
-                    } else {
-                        logCallback(`[${currentAccount.email}] ⚠️ Error: ${errMsg}`);
-                        queue.unshift(currentItem); // Retry
-                    }
-                }
-
-            } catch (err) {
-                if (err.message === "Stopped by user") {
-                    logCallback(`[Worker ${workerId}] Stopped.`);
-                } else {
-                    const msg = err.message;
-                    logCallback(`[Worker ${workerId}] Account Error: ${msg}`);
-
-                    if (msg.includes("Account Blocked")) {
-                        // Hard Block -> Disable Account
-                        accountStatus = 'error';
-                    } else if (msg.includes("Auth Timeout")) {
-                        // Soft Timeout -> Keep Account OK, but it will be rotated to back of queue
-                        logCallback(`[Worker ${workerId}] Soft Timeout. Account kept in rotation.`);
-                        accountStatus = 'ok';
-                    } else if (msg.includes("Failed to authenticate")) {
-                        // Unknown auth failure -> assume soft error to be safe, or hard?
-                        // Let's assume soft for now as network issues are common.
-                        accountStatus = 'ok';
-                    }
-                }
-            } finally {
-                // cleanup
-                if (browser) {
-                    try {
-                        logCallback(`[Worker ${workerId}] Closing browser for ${currentAccount.email}...`);
-                        const closePromise = browser.close();
-                        // Race against 5s timeout
-                        const timeoutPromise = new Promise(resolve => setTimeout(() => resolve('timeout'), 5000));
-                        const result = await Promise.race([closePromise, timeoutPromise]);
-
-                        if (result === 'timeout') {
-                            logCallback(`[Worker ${workerId}] Browser close timed out. Force killing process...`);
-                            const process = browser.process();
-                            if (process) process.kill('SIGKILL');
-                        }
-                    } catch (e) {
-                        logCallback(`[Worker ${workerId}] Error closing browser: ${e.message}`);
-                    }
-                }
-                // Release account
-                if (currentAccount) {
-                    let cooldown = 0;
-
-                    // Logic to determine cooldown
-                    // If no explicit status change (status is 'ok'), but we perhaps had a soft error?
-                    // We can track if we successfully generated an item. 
-                    // Actually, let's look at the Error message or local variables.
-                    // Ideally we should have set a flag. But for now, let's say:
-                    // If accountStatus is 'ok' but we crashed/errored out early, maybe add short cooldown?
-                    // But if we just finished normally, cooldown = 0.
-
-                    // If we are releasing with 'error' or 'limited', cooldown doesn't matter (it's dead).
-                    // If we are releasing with 'ok', we check if it was a soft error.
-                    // The 'worker' function local variables are tricky to pass here cleanly without refactor.
-                    // Let's assume the catch block handles the decision.
-
-                    // Hack: We can change accountStatus to 'cooldown' temporarily? No, status is perma-state.
-                    // Let's rely on the error catch block to set a var.
-
-                    // Re-reading catch block:
-                    // Soft Timeout -> accountStatus = 'ok'
-                    // Failed to auth -> accountStatus = 'ok'
-
-                    // If we failed to auth, we DEFINITELY want a cooldown.
-                    // Let's default to 0. 
-
-                    // IMPROVEMENT: Check if queue item was NOT processed successfully?
-                    // If we are breaking the loop and releasing, and we didn't finish cleanly...
-                    // Let's use a heuristic: if browser is closed due to error, apply 60s cooldown.
-
-                    // We can check if 'authToken' was ever obtained. 
-                    if (!authToken && accountStatus === 'ok') {
-                        cooldown = 60; // 60s cooldown if we failed to get token
-                    }
-
-                    pool.release(currentAccount.email, accountStatus, cooldown);
-
-                    const cooldownMsg = cooldown > 0 ? ` (Cooldown: ${cooldown}s)` : "";
-                    logCallback(`[Worker ${workerId}] Released account: ${currentAccount.email} (Status: ${accountStatus}${cooldownMsg})`);
-                }
-            }
-        }
-        logCallback(`[Worker ${workerId}] Finished.`);
-    };
-
-    // 4. Start Workers
+    // 4. Start Workers (Consumers)
     const activeWorkers = [];
-    // We cap at the requested concurrency OR 10 (hard max) as per user request
-    const actualConcurrency = Math.min(concurrency, 10);
+    const actualConcurrency = Math.max(1, concurrency); // User defined, no hard cap
 
-    logCallback(`Spawning ${actualConcurrency} workers (Staggered start)...`);
+    safeLog(`Spawning ${actualConcurrency} generator workers...`);
 
     for (let i = 0; i < actualConcurrency; i++) {
-        // Stagger: 4s delay to be safer
-        if (i > 0) await new Promise(r => setTimeout(r, 4000));
-        activeWorkers.push(worker(i + 1));
+        activeWorkers.push(runGeneratorWorker(i + 1, queue, tokenPool, safeLog, statusCallback, savePath, duration, aspectRatio, muteAudio));
     }
+
+    // 5. Wait for Workers
+    // We wait for workers to finish the queue. 
+    // Harvester might still be running if we have way more accounts than needed for the queue?
+    // Or if queue finishes fast.
 
     await Promise.all(activeWorkers);
 
-    logCallback(`✅ All workers finished. Generated ${completedCount} / ${totalItems} items.`);
+    // 6. Cleanup
+    // If workers are done, we can stop harvester?
+    isStopped = true; // Signal harvester to stop if not done
+    await harvesterPromise; // Clean await
+
+    safeLog('✅ Automation Generation Complete.');
 }
 
 module.exports = { runGenerate, stopGenerate };

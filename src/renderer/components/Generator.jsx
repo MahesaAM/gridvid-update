@@ -273,21 +273,33 @@ const TextListItem = memo(({ text, index, status, timer }) => {
 
 
 // --- LOGS PANEL COMPONENT (ISOLATED) ---
-const LogsPanel = memo(() => {
+const LogsPanel = memo(({ type, title, color }) => {
     const [logs, setLogs] = useState([]);
     const logsEndRef = useRef(null);
 
     useEffect(() => {
         if (window.api) {
-            const handleLog = (msg) => {
-                setLogs(prev => [...prev.slice(-99), { message: msg, time: new Date().toLocaleTimeString() }]);
+            const handleLog = (data) => {
+                // Support both structured { key, message } and legacy string
+                let msgKey = 'system';
+                let msgContent = '';
+
+                if (typeof data === 'string') {
+                    msgContent = data;
+                } else {
+                    msgKey = data.key || 'system';
+                    msgContent = data.message;
+                }
+
+                // Filter
+                if (type === 'auth' && msgKey !== 'auth') return;
+                if (type === 'gen' && msgKey !== 'gen') return;
+
+                setLogs(prev => [...prev.slice(-99), { message: msgContent, time: new Date().toLocaleTimeString() }]);
             };
             window.api.receive('log-update', handleLog);
-
-            // Cleanup not trivial with current 'receive' implementation usually adding listeners
-            // but for this app structure it's fine as LogsPanel is always mounted when in Generator tab
         }
-    }, []);
+    }, [type]);
 
     // Auto-scroll logs
     useEffect(() => {
@@ -297,10 +309,10 @@ const LogsPanel = memo(() => {
     }, [logs]);
 
     return (
-        <div className="bg-slate-950 border-t border-white/10 h-[140px] flex flex-col shrink-0">
-            <div className="px-3 py-1.5 flex items-center gap-2 border-b border-white/5 bg-slate-900/20">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
-                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">System Logs</span>
+        <div className="bg-slate-950 border-t border-white/10 h-full flex flex-col shrink-0 flex-1 min-h-0 border-r border-slate-900 last:border-r-0">
+            <div className={`px-3 py-1.5 flex items-center gap-2 border-b border-white/5 bg-slate-900/20`}>
+                <div className={`w-1.5 h-1.5 rounded-full ${color} animate-pulse`}></div>
+                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">{title}</span>
             </div>
             <div className="flex-1 overflow-y-auto p-2 font-mono text-[9px] space-y-0.5 custom-scrollbar">
                 {logs.length === 0 && <div className="text-slate-700 italic px-2">Waiting for activity...</div>}
@@ -679,7 +691,10 @@ export default function Generator({ mode, isHeadless }) {
                 </div>
 
                 {/* Logs Drawer (ISOLATED) */}
-                <LogsPanel />
+                <div className="h-[180px] flex shrink-0 border-t border-white/10 bg-slate-950">
+                    <LogsPanel type="auth" title="Authentication / System" color="bg-indigo-500" />
+                    <LogsPanel type="gen" title="Generation Activity" color="bg-emerald-500" />
+                </div>
 
             </div>
         </div >
