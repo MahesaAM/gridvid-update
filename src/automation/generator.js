@@ -89,7 +89,7 @@ function saveState(state) {
  * TokenHarvester (Producer)
  * Logs into accounts sequentially and pushes tokens to the pool.
  */
-async function runTokenHarvest(accounts, tokenPool, logCallback, muteAudio, headless) {
+async function runTokenHarvest(accounts, tokenPool, logCallback, accountCallback, muteAudio, headless) {
     logCallback({ key: 'auth', message: 'Starting Token Harvester...' });
 
     // Load last used index
@@ -113,6 +113,7 @@ async function runTokenHarvest(accounts, tokenPool, logCallback, muteAudio, head
         const account = accounts[currentIndex];
 
         logCallback({ key: 'auth', message: `[${account.email}] Harvesting token...` });
+        if (accountCallback) accountCallback({ email: account.email, index: currentIndex + 1 });
 
         // Update state to next index immediately so if we stop/crash, we start from next one
         const nextIndex = (currentIndex + 1) % accounts.length;
@@ -306,7 +307,7 @@ async function runGenerate(params, logCallback, statusCallback, accountCallback)
 
     // 3. Start Harvester (Producer) - runs in background
     // We DON'T await this yet, it runs totally parallel filling the pool.
-    const harvesterPromise = runTokenHarvest(accounts, tokenPool, safeLog, muteAudio, headless);
+    const harvesterPromise = runTokenHarvest(accounts, tokenPool, safeLog, accountCallback, muteAudio, headless);
 
     // 4. Start Workers (Consumers)
     const activeWorkers = [];

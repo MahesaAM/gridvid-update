@@ -472,6 +472,7 @@ async function runLoginAll(accounts, logCallback = console.log, options = {}) {
         fs.writeFileSync(path.join(profDir, 'email.txt'), acc.email);
 
         logCallback(`Processing [${i + 1}/${accounts.length}] ${acc.email}`);
+        if (options.accountCallback) options.accountCallback({ email: acc.email, index: i + 1 });
 
         let browser;
         try {

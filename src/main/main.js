@@ -284,7 +284,11 @@ ipcMain.on('login-accounts', async (event) => {
         const results = await runLoginAll(
             accounts,
             (msg) => event.sender.send('log-update', msg),
-            { profilesRoot, keepBrowserOpen: false }
+            {
+                profilesRoot,
+                keepBrowserOpen: false,
+                accountCallback: (data) => event.sender.send('account-update', data)
+            }
         );
 
         // Update accounts status based on results
