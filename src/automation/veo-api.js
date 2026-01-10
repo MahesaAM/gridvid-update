@@ -179,32 +179,52 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
 
             if (clicked) {
                 logCallback("Sign in clicked. Waiting for popup or navigation...");
-                await new Promise(r => setTimeout(r, 1000));
+
+                // Extended wait for Popup (15s)
+                let newTarget = null;
                 try {
-                    const newTarget = await page.browser().waitForTarget(target => target.opener() === page.target(), { timeout: 5000 });
-                    if (newTarget) {
-                        logCallback(">>> POPUP DETECTED via waitForTarget! Switching context <<<");
+                    newTarget = await page.browser().waitForTarget(target => target.opener() === page.target(), { timeout: 15000 });
+                } catch (e) { }
+
+                if (newTarget) {
+                    logCallback(">>> POPUP DETECTED via waitForTarget! Switching context <<<");
+                    loginPage = await newTarget.page();
+                    if (!loginPage) {
+                        await new Promise(r => setTimeout(r, 1000));
                         loginPage = await newTarget.page();
-                        if (!loginPage) {
-                            await new Promise(r => setTimeout(r, 1000));
-                            loginPage = await newTarget.page();
-                        }
                     }
-                } catch (e) {
-                    // Fallback: Check all pages for one that looks like Google Accounts
-                    const pages = await page.browser().pages();
-                    const googlePage = pages.find(p => p.url().includes('accounts.google.com') || p.url().includes('accounts.youtube.com'));
-                    if (googlePage && googlePage !== page) {
-                        logCallback(">>> POPUP DETECTED via Page List! Switching context <<<");
+                } else {
+                    // Robust check for existing pages (in case we missed the event)
+                    logCallback("waitForTarget timeout. Checking open pages...");
+                    let googlePage = null;
+                    for (let k = 0; k < 10; k++) { // Poll for 10s
+                        const pages = await page.browser().pages();
+                        googlePage = pages.find(p => p !== page && (p.url().includes('accounts.google.com') || p.url().includes('accounts.youtube.com')));
+                        if (googlePage) break;
+                        await new Promise(r => setTimeout(r, 1000));
+                    }
+
+                    if (googlePage) {
+                        logCallback(">>> POPUP DETECTED via Page List scan! Switching context <<<");
                         loginPage = googlePage;
                         await loginPage.bringToFront();
                     } else {
-                        logCallback("No new target/popup detected. Assuming same-page or redirect.");
-                        // If redirect, perform simple wait
-                        await new Promise(r => setTimeout(r, 2000));
-                        // If url changed to accounts.google.com, then 'page' is the loginPage
+                        logCallback("No new target/popup detected. Checking current URL...");
+                        // Check if main page redirected
                         if (page.url().includes('accounts.google.com')) {
                             logCallback("Redirect detected (URL match). Proceeding on main page.");
+                            loginPage = page;
+                        } else {
+                            logCallback("⚠️ Clicked 'Sign In' but verified no navigation/popup. FORCING navigation to Google Login...");
+                            // Force navigation to login page
+                            try {
+                                const opalLoginUrl = "https://accounts.google.com/ServiceLogin?continue=https://opal.google/&service=wise&passive=1209600";
+                                await page.goto(opalLoginUrl, { waitUntil: 'domcontentloaded' });
+                                await new Promise(r => setTimeout(r, 2000));
+                                loginPage = page;
+                            } catch (err) {
+                                logCallback(`Forced navigation failed: ${err.message}`);
+                            }
                         }
                     }
                 }
