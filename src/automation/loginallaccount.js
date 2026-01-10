@@ -237,6 +237,52 @@ async function handleOne(page, browser, { email, password }, logCallback = conso
         }
     }
 
+    // --- CRITICAL FIX: TYPE PASSWORD ---
+    // Previously the code detected the password field but forgot to type into it!
+    if (result === 'password') {
+        try {
+            logCallback('Typing password...');
+            // Small settle time for animation
+            await new Promise(r => setTimeout(r, 1000));
+
+            // Type password using robust utility
+            await clearAndType(page, passwordSelector, password);
+            await new Promise(r => setTimeout(r, 800)); // Wait for valid input state
+
+            // Click Next with robust wait
+            logCallback('Clicking "Next" after password...');
+            const nextBtnSelectors = ['#passwordNext', 'button[jsname="LgbsSe"]', '#passwordNext button'];
+
+            let clicked = false;
+            for (const sel of nextBtnSelectors) {
+                try {
+                    const btn = await page.$(sel);
+                    if (btn && await btn.boundingBox()) {
+                        await clickFast(page, sel);
+                        clicked = true;
+                        break;
+                    }
+                } catch (e) { }
+            }
+
+            if (!clicked) {
+                // Fallback: Press Enter
+                logCallback('Next button not found/clickable, pressing Enter...');
+                await page.keyboard.press('Enter');
+            }
+
+            // Wait for navigation or verification
+            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(e => {
+                console.log('Observation: Navigation wait timeout after password (might be normal if SPA transition).');
+            });
+
+        } catch (e) {
+            logCallback(`Error typing password: ${e.message}`);
+            return { success: false, reason: 'Password entry failed' };
+        }
+    }
+    // -----------------------------------
+
 
 
     // Helper sleep since not imported

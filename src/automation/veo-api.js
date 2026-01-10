@@ -1,45 +1,48 @@
 const fs = require('fs');
 const path = require('path');
-const { getOpalFrame, clearAndType } = require('./common-utils');
+const { getOpalFrame, clearAndType, clickFast, waitAndClick } = require('./common-utils');
 
 const { execFile } = require('child_process');
 
 // robust-get-auth-token logic adapted from user's script
 async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@diigimon.com", accountPassword = "Genshin123") {
-    logCallback("Starting robust token capture...");
+    logCallback("Starting robust token capture (CDP Mode)...");
 
     let authToken = null;
+    let cdpSession = null;
 
-    // Disable cache to ensure we see the network requests
+    // --- CDP LISTENER SETUP ---
     try {
-        await page.setCacheEnabled(false);
-        const client = await page.target().createCDPSession();
-        await client.send('Network.setCacheDisabled', { cacheDisabled: true });
-    } catch (e) {
-        logCallback(`Warning: Failed to disable cache: ${e.message}`);
-    }
+        cdpSession = await page.target().createCDPSession();
+        await cdpSession.send('Network.enable');
 
-    await page.setRequestInterception(true);
+        cdpSession.on('Network.requestWillBeSent', (params) => {
+            if (authToken) return; // Stop processing if found
 
-    const requestHandler = (request) => {
-        const headers = request.headers();
-        const authHeader = Object.keys(headers).find(k => k.toLowerCase() === 'authorization');
+            const headers = params.request.headers || {};
+            // Headers in CDP can be lowercase or mixed case, robust check
+            let tokenValue = null;
 
-        if (authHeader) {
-            const tokenValue = headers[authHeader];
-            if (tokenValue && tokenValue.startsWith('Bearer ')) {
-                if (!authToken) {
-                    authToken = tokenValue;
-                    logCallback("\n>>> TOKEN FOUND! <<<");
+            for (const key in headers) {
+                if (key.toLowerCase() === 'authorization') {
+                    tokenValue = headers[key];
+                    break;
                 }
             }
-        }
-        request.continue();
-    };
 
-    page.on('request', requestHandler);
+            if (tokenValue && tokenValue.startsWith('Bearer ')) {
+                authToken = tokenValue;
+                logCallback(`\n>>> TOKEN FOUND via CDP! (${params.request.url.substring(0, 50)}...) <<<`);
+            }
+        });
+        logCallback("CDP Network Listener attached.");
+    } catch (e) {
+        logCallback(`CRITICAL: Failed to attach CDP session: ${e.message}`);
+        // Fallback or exit? user mentions other PCs work, so maybe this PC has issue with CDP? 
+        // Unlikely, standard Puppeteer relies on it.
+    }
 
-    logCallback("Reloading/Navigating to https://google.com ...");
+    logCallback("Navigating to https://opal.google ...");
 
     // Optimization: Promise that resolves as soon as token is found
     const tokenFoundPromise = new Promise(resolve => {
@@ -49,7 +52,7 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
                 resolve(authToken);
             }
         }, 100);
-        // Timeout this promise after 25s
+        // Timeout this promise after 25s for the initial phase
         setTimeout(() => { clearInterval(checkInterval); resolve(null); }, 25000);
     });
 
@@ -58,35 +61,30 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
         const navigatePromise = page.goto('https://opal.google', { waitUntil: 'domcontentloaded' });
         await Promise.race([navigatePromise, tokenFoundPromise]);
     } catch (e) {
-        logCallback(`Navigation error (or ignored): ${e.message}`);
+        logCallback(`Navigation notification: ${e.message}`);
     }
 
-    // Immediate Probe
+    // Immediate Probe (using page context check)
     if (!authToken) {
-        logCallback("Initial nav done. Probing...");
+        logCallback("Initial nav done. Probing network...");
         try {
             await page.evaluate(() => {
-                fetch("https://appcatalyst.pa.googleapis.com/v1beta1/mobile_service:execute", {
-                    method: "POST",
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ dummy: true })
-                }).catch(() => { });
-            });
+                // Try to trigger a "refresh" of data
+                if (window.app) window.app.refresh(); // Hypothetical
+            }).catch(() => { });
         } catch (e) { }
     }
 
     // Brief stabilization
     if (!authToken) await new Promise(r => setTimeout(r, 1500));
 
+    // Cleanup Function
     const cleanup = async () => {
         try {
-            page.off('request', requestHandler);
-            // Re-enabling cache might be good but optional.
-            // Crucially, disable interception to return control to browser.
-            await page.setRequestInterception(false);
-        } catch (e) {
-            // Ignore errors if page is closed
-        }
+            if (cdpSession) {
+                await cdpSession.detach();
+            }
+        } catch (e) { }
     };
 
     if (authToken) {
@@ -95,51 +93,29 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
     }
 
     // [NEW] CHECK FOR EXISTING SESSION / LOGGED IN STATE
-    // Before searching for "Sign In" buttons, let's see if we are already seeing the app.
-    // Common indicator: Google Profile Avatar in top right.
-    // Opal specific: The main app interface is visible.
-
     let isAlreadyLoggedIn = false;
     try {
-        // Quick check for Profile Avatar (generic Google class usually 'gb_A' or aria-label containing account info)
-        // Or check if "Sign In" is ABSENT and we are on opal.google
+        // Quick check for Profile Avatar
         const profileSelector = 'a[aria-label^="Google Account"], a[aria-label*="Account"], img.gb_A, div.gb_A';
-        const profile = await page.$(profileSelector);
-
-        if (profile) {
-            const label = await page.evaluate(el => el.getAttribute('aria-label'), profile);
-            logCallback(`Active session detected (Profile found: ${label}). Skipping login interactions.`);
+        // Wait shorter time for profile
+        try {
+            await page.waitForSelector(profileSelector, { timeout: 3000 });
             isAlreadyLoggedIn = true;
-        } else {
-            // Second check: usage of #opal-app without landing page overlay?
-            // Harder to detect reliably without more selectors. 
-            // Let's rely on the ABSENCE of "Sign In" buttons later, BUT we want to avoid the "Wait for Sign In" delay if possible.
+            logCallback("Active session detected (Profile found). Skipping login interactions.");
+        } catch (e) {
+            // Not found
         }
     } catch (e) { }
 
-    if (isAlreadyLoggedIn) {
-        // If we are logged in but don't have token yet, we just wait/refresh.
-        logCallback("Already logged in. Waiting for token to appear...");
-        // Maybe force a reload if it's taking too long?
-        if (!authToken) {
-            await new Promise(r => setTimeout(r, 2000));
-            if (!authToken) {
-                logCallback("Still no token. Forcing reload to trigger network traffic...");
-                await page.reload({ waitUntil: 'domcontentloaded' });
-            }
-        }
-    } else {
+    if (!isAlreadyLoggedIn) {
         // Only enter this block if NOT definitely logged in
         logCallback("Token not found immediately & No session detected. Checking for sign in...");
         try {
             // Existing Sign-In Logic...
-            // Find & Click Sign In
-            // Find & Click Sign In
             const performClick = async () => {
                 const clickStartTime = Date.now();
                 while (Date.now() - clickStartTime < 10000) { // Retry for 10s
                     try {
-                        // Check if we are already on login page (email input exists)
                         const emailSelector = 'input[type="email"]';
                         if (await page.$(emailSelector)) {
                             logCallback("Already on login page (email input found).");
@@ -165,10 +141,9 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
                                 } catch (e) { }
                             }
 
-                            // 2. Text Search on wider candidates
+                            // 2. Text Search
                             const buttons = await scope.$$('button, a, div[role="button"], span[role="button"]');
                             for (const btn of buttons) {
-                                // Skip invisible
                                 try {
                                     const visible = await scope.evaluate(el => el.offsetParent !== null, btn);
                                     if (!visible) continue;
@@ -206,9 +181,9 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
                 logCallback("Sign in clicked. Waiting for popup or navigation...");
                 await new Promise(r => setTimeout(r, 1000));
                 try {
-                    const newTarget = await page.browser().waitForTarget(target => target.opener() === page.target(), { timeout: 10000 });
+                    const newTarget = await page.browser().waitForTarget(target => target.opener() === page.target(), { timeout: 5000 });
                     if (newTarget) {
-                        logCallback(">>> POPUP DETECTED! Switching context <<<");
+                        logCallback(">>> POPUP DETECTED via waitForTarget! Switching context <<<");
                         loginPage = await newTarget.page();
                         if (!loginPage) {
                             await new Promise(r => setTimeout(r, 1000));
@@ -216,13 +191,22 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
                         }
                     }
                 } catch (e) {
-                    logCallback("No new target/popup detected. Assuming same-page.");
-                }
-
-                if (loginPage && loginPage !== page) {
-                    // Removed waitForNetworkIdle to attach interceptor immediately to avoid missing early requests
-                    await loginPage.setRequestInterception(true);
-                    loginPage.on('request', requestHandler);
+                    // Fallback: Check all pages for one that looks like Google Accounts
+                    const pages = await page.browser().pages();
+                    const googlePage = pages.find(p => p.url().includes('accounts.google.com') || p.url().includes('accounts.youtube.com'));
+                    if (googlePage && googlePage !== page) {
+                        logCallback(">>> POPUP DETECTED via Page List! Switching context <<<");
+                        loginPage = googlePage;
+                        await loginPage.bringToFront();
+                    } else {
+                        logCallback("No new target/popup detected. Assuming same-page or redirect.");
+                        // If redirect, perform simple wait
+                        await new Promise(r => setTimeout(r, 2000));
+                        // If url changed to accounts.google.com, then 'page' is the loginPage
+                        if (page.url().includes('accounts.google.com')) {
+                            logCallback("Redirect detected (URL match). Proceeding on main page.");
+                        }
+                    }
                 }
             }
 
@@ -255,41 +239,217 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
             // --- CREDENTIALS ENTRY ---
             const emailSelector = 'input[type="email"]';
             try {
-                await loginPage.waitForSelector(emailSelector, { visible: true, timeout: 5000 });
+                // Increased timeout to 60s for VERY slow connections
+                logCallback("Waiting for email field (60s timeout)...");
+                await loginPage.waitForSelector(emailSelector, { visible: true, timeout: 60000 });
                 logCallback(`Auto-filling email: ${accountEmail}`);
-                logCallback(`Auto-filling email: ${accountEmail}`);
-                await clearAndType(loginPage, emailSelector, accountEmail);
-                await new Promise(r => setTimeout(r, 500));
-                const nextButtonSelector = '#identifierNext button';
-                const nextBtn = await loginPage.$(nextButtonSelector);
-                if (nextBtn) await nextBtn.click();
-                else await loginPage.keyboard.press('Enter');
-            } catch (e) { }
 
+                // Retry loop for email typing
+                for (let i = 0; i < 3; i++) {
+                    await clearAndType(loginPage, emailSelector, accountEmail);
+                    await new Promise(r => setTimeout(r, 1000));
+                    const val = await loginPage.evaluate(s => document.querySelector(s)?.value, emailSelector);
+                    if (val === accountEmail) break;
+                    logCallback(`Email mismatch (Got: ${val}), retrying typing...`);
+                }
+
+                // Robust 'Next' clicking with Spinner Wait
+                logCallback("Clicking Next after email...");
+
+                const clickNextStrats = async () => {
+                    // Strategy 1: Standard ID
+                    if (await clickFast(loginPage, '#identifierNext', 2000)) return true;
+                    // Strategy 2: jsname
+                    if (await clickFast(loginPage, 'button[jsname="LgbsSe"]', 2000)) return true;
+                    // Strategy 3: Text Content (Next/Berikutnya)
+                    return await loginPage.evaluate(() => {
+                        const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                        const nextBtn = buttons.find(b => {
+                            const t = b.innerText.toLowerCase().trim();
+                            return t === 'next' || t === 'berikutnya' || t === 'lanjut' || t === 'selanjutnya';
+                        });
+                        if (nextBtn) {
+                            nextBtn.click();
+                            return true;
+                        }
+                        return false;
+                    });
+                };
+
+                let nextSuccess = await clickNextStrats();
+
+                if (!nextSuccess) {
+                    logCallback("Standard Next button search failed. Trying generic 'Enter' key...");
+                    await loginPage.keyboard.press('Enter');
+                }
+
+                // WAIT FOR SPINNER / LOADING
+                try {
+                    await loginPage.waitForFunction(() => {
+                        const spinner = document.querySelector('div[role="progressbar"], div.k4hzFd, .k4hzFd');
+                        return !spinner || spinner.getAttribute('aria-hidden') === 'true' || spinner.style.display === 'none';
+                    }, { timeout: 10000 });
+                } catch (e) { }
+
+                // Critical: Wait for some change.
+                await new Promise(r => setTimeout(r, 3000));
+            } catch (e) {
+                logCallback(`Email entry flow warning: ${e.message}`);
+            }
+
+            // Check for potential "Verify it's you" or standard Password
             const passwordSelector = 'input[type="password"]';
+            let passwordEntered = false;
+
             try {
-                await loginPage.waitForSelector(passwordSelector, { visible: true, timeout: 8000 });
-                await new Promise(r => setTimeout(r, 1000));
-                logCallback("Auto-filling password...");
-                logCallback("Auto-filling password...");
-                await clearAndType(loginPage, passwordSelector, accountPassword);
-                await new Promise(r => setTimeout(r, 500));
-                const passwordNextSelector = '#passwordNext button';
-                const pwNextBtn = await loginPage.$(passwordNextSelector);
-                if (pwNextBtn) await pwNextBtn.click();
-                else await loginPage.keyboard.press('Enter');
-            } catch (e) { }
+                // Wait for password OR verification challenge
+                // Increased timeout to 60s for slow net
+                logCallback("Waiting for password field (60s)...");
+
+                let res = await Promise.race([
+                    loginPage.waitForSelector(passwordSelector, { visible: true, timeout: 60000 }).then(() => 'password'),
+                    loginPage.waitForSelector('div[data-challenge="phone"], div#phoneNumberChallenged', { visible: true, timeout: 60000 }).then(() => 'phone_verify')
+                ]).catch(() => 'timeout');
+
+                // Fallback: Check page text if timeout (Maybe selector changed?)
+                if (res === 'timeout') {
+                    const pageContent = await loginPage.content();
+                    const lowerContent = pageContent.toLowerCase();
+                    if (lowerContent.includes('password') || lowerContent.includes('sandi')) {
+                        logCallback("⚠️ Password field selector timed out, but 'password' text found in HTML. Trying blind interaction...");
+                        res = 'password';
+                    } else {
+                        // Debug: Save HTML
+                        const debugFile = path.join(process.cwd(), `debug_login_${Date.now()}.html`);
+                        fs.writeFileSync(debugFile, pageContent);
+                        logCallback(`⚠️ Password timeout and no text match. Saved HTML to ${debugFile}`);
+                    }
+                }
+
+                if (res === 'phone_verify') {
+                    logCallback("⚠️ Device verification requested (Phone/Tap Yes). Manual intervention might be needed.");
+                } else if (res === 'password') {
+                    await new Promise(r => setTimeout(r, 1000));
+                    logCallback("Auto-filling password...");
+
+                    // RETRY LOGIC FOR PASSWORD
+                    for (let i = 0; i < 3; i++) {
+                        try {
+                            // Try standard selector first
+                            let inputFound = await loginPage.$(passwordSelector);
+
+                            // If not found (blind mode), try generic input
+                            if (!inputFound) {
+                                const inputs = await loginPage.$$('input');
+                                for (const inp of inputs) {
+                                    const type = await loginPage.evaluate(el => el.type, inp);
+                                    if (type === 'password') {
+                                        inputFound = inp;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (inputFound) {
+                                // Ensure enabled
+                                await loginPage.waitForFunction(e => !e.disabled, {}, inputFound).catch(() => { });
+
+                                // Manual focus and type
+                                await inputFound.focus();
+                                await new Promise(r => setTimeout(r, 500));
+                                await loginPage.keyboard.down('Control');
+                                await loginPage.keyboard.press('A');
+                                await loginPage.keyboard.up('Control');
+                                await loginPage.keyboard.press('Backspace');
+                                await loginPage.keyboard.type(accountPassword, { delay: 150 }); // Slower typing
+                            } else {
+                                // Last resort: just type blind
+                                logCallback("Checking focused element for blind drive...");
+                                await loginPage.keyboard.type(accountPassword, { delay: 150 });
+                            }
+
+
+                            await new Promise(r => setTimeout(r, 1000));
+
+                            // Click Next with robust strategy
+                            const clickPwNextStrats = async () => {
+                                // Strategy 1: Standard ID
+                                if (await clickFast(loginPage, '#passwordNext', 2000).catch(() => false)) return true;
+                                // Strategy 2: jsname
+                                if (await clickFast(loginPage, 'button[jsname="LgbsSe"]', 2000).catch(() => false)) return true;
+                                // Strategy 3: Text Content
+                                return await loginPage.evaluate(() => {
+                                    const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                                    const nextBtn = buttons.find(b => {
+                                        const t = b.innerText.toLowerCase().trim();
+                                        return t === 'next' || t === 'berikutnya' || t === 'lanjut' || t === 'selanjutnya';
+                                    });
+                                    if (nextBtn) {
+                                        nextBtn.click();
+                                        return true;
+                                    }
+                                    return false;
+                                });
+                            };
+
+                            let pwNextClicked = await clickPwNextStrats();
+                            if (!pwNextClicked) {
+                                logCallback("Password Next button not found via standard selectors. Pressing Enter...");
+                                await loginPage.keyboard.press('Enter');
+                            }
+
+                            // Check for immediate success indicators (Spinner or Navigation)
+                            try {
+                                const transitionStart = Date.now();
+                                await loginPage.waitForFunction(() => {
+                                    // Check for spinner
+                                    const spinner = document.querySelector('div[role="progressbar"], div.k4hzFd, .k4hzFd');
+                                    const spinnerVisible = spinner && (spinner.getAttribute('aria-hidden') !== 'true' && spinner.style.display !== 'none');
+                                    // Check if password field is gone/disabled
+                                    const pwField = document.querySelector('input[type="password"]');
+                                    const pwGone = !pwField || pwField.disabled || pwField.offsetParent === null;
+
+                                    return spinnerVisible || pwGone;
+                                }, { timeout: 3000 });
+
+                                logCallback("Password submission detected (Spinner or Field gone).");
+                                passwordEntered = true;
+                                break;
+                            } catch (e) { }
+
+                            // Check for immediate "Enter a password" error (fast fail)
+                            const hasError = await loginPage.evaluate(() => {
+                                const errs = Array.from(document.querySelectorAll('div[aria-live="assertive"], div[jsname="B34EJ"]'));
+                                return errs.some(e => e.innerText && (e.innerText.includes("Enter a password") || e.innerText.includes("Masukkan sandi")));
+                            });
+
+                            if (hasError) {
+                                logCallback(`⚠️ Detected 'Enter a password' error (Attempt ${i + 1}/3). Retrying...`);
+                                continue;
+                            } else {
+                                // If no error and we clicked next, assume success
+                                passwordEntered = true;
+                                break;
+                            }
+                        } catch (e) {
+                            logCallback(`Password attempt ${i + 1} failed: ${e.message}`);
+                        }
+                    }
+
+                } else {
+                    logCallback("⚠️ Password field did not appear (timeout). Checking for other interruptions...");
+                }
+            } catch (e) {
+                logCallback(`Password step error: ${e.message}`);
+            }
 
             // Consent Loop
-            // --- ROBUST CONSENT / SPEEDBUMP HANDLER ---
             let consentClicks = 0;
             try {
                 const startTime = Date.now();
-                // Extended loop to 25s to catch slow loads or multiple screens
                 while (Date.now() - startTime < 25000) {
                     if (loginPage.isClosed()) break;
 
-                    // 1. Check for "Early Access" BLOCK / Hard Rejection
                     try {
                         const pageText = await loginPage.evaluate(() => document.body.innerText.toLowerCase());
                         if (pageText.includes("early access") && (pageText.includes("doesn't have access") || pageText.includes("tidak memiliki akses"))) {
@@ -297,9 +457,7 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
                         }
                     } catch (e) { if (e.message.includes("Account Blocked")) throw e; }
 
-                    // 2. Click Consent Buttons
                     const btnClicked = await loginPage.evaluate(() => {
-                        // Broader list of keywords
                         const keywords = [
                             "continue", "lanjutkan", "next", "berikutnya",
                             "i agree", "saya setuju", "accept", "allow", "izinkan",
@@ -311,11 +469,8 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
                         const candidates = Array.from(document.querySelectorAll('button, input[type="submit"], div[role="button"], span[role="button"]'));
 
                         for (const btn of candidates) {
-                            // Ignore hidden elements
                             if (btn.offsetParent === null) continue;
-
                             const t = (btn.innerText || btn.value || "").toLowerCase().trim();
-                            // Exact match or includes for longer sentences
                             if (keywords.some(k => t === k || (t.length < 30 && t.includes(k)))) {
                                 btn.click();
                                 return true;
@@ -327,111 +482,54 @@ async function getAuthTokenFromPage(page, logCallback, accountEmail = "kadesimo@
                     if (btnClicked) {
                         consentClicks++;
                         logCallback(`Clicked consent/interstitial button. (Click #${consentClicks})`);
-                        await new Promise(r => setTimeout(r, 2000)); // Wait for nav
+                        await new Promise(r => setTimeout(r, 2000));
                     } else {
                         await new Promise(r => setTimeout(r, 1000));
                     }
                 }
             } catch (e) {
                 if (e.message.includes("Account Blocked")) throw e;
-                // Otherwise ignore regex errors
             }
-
         } catch (e) {
             logCallback("Auto-login logic error: " + e.message);
         }
-    } // End of isAlreadyLoggedIn Check
-
-    // Fallback Probe
-    if (!authToken) {
-        logCallback("Attempting aggressive fallback...");
-        try {
-            if (page.url().includes("opal.google")) {
-                // Relaxed wait condition to avoid timeout on slow network
-                await page.goto('https://opal.google', { waitUntil: 'domcontentloaded', timeout: 45000 });
-                await new Promise(r => setTimeout(r, 3000)); // Manual wait for scripts
-
-                // Probe again
-                if (!authToken) {
-                    try {
-                        await page.evaluate(() => {
-                            fetch("https://appcatalyst.pa.googleapis.com/v1beta1/mobile_service:execute", {
-                                method: "POST",
-                                headers: { "content-type": "application/json" },
-                                body: JSON.stringify({ dummy: true })
-                            }).catch(() => { });
-                        });
-                        await new Promise(r => setTimeout(r, 3000));
-                    } catch (e) { }
-                }
-            }
-        } catch (e) { }
     }
 
-    logCallback("Waiting for token capture...");
+    logCallback("Waiting for token capture (CDP)...");
     const maxWaitTime = 60000;
     const startTime = Date.now();
+    let hasReloaded = false;
+
     while (!authToken) {
-        if (Date.now() - startTime > maxWaitTime) {
-            // Check FOR BLOCKS before throwing timeout
-            // Check FOR BLOCKS
+        const elapsed = Date.now() - startTime;
+
+        if (elapsed > maxWaitTime) {
             try {
                 const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
+                if (pageText.includes("enter a phone number") || pageText.includes("masukkan nomor telepon")) throw new Error("Account Blocked: Phone verification.");
+                if (pageText.includes("couldn't sign you in")) throw new Error("Account Blocked: Sign-in rejected.");
+            } catch (e) { if (e.message.includes("Account Blocked")) throw e; }
 
-                // 1. Phone Number Required (Hard Block)
-                if (pageText.includes("enter a phone number") || pageText.includes("masukkan nomor telepon") || pageText.includes("provide a phone number")) {
-                    throw new Error("Account Blocked: Phone verification required.");
-                }
-
-                // 2. "Verify it's you" (Soft Block -> Try Bypass)
-                if (pageText.includes("verify it's you") || pageText.includes("verify it’s you") || pageText.includes("verifikasi diri anda")) {
-                    logCallback("⚠️ 'Verify it's you' detected. Attempting 'Try another way'...");
-
-                    const tryAnotherWayClicked = await page.evaluate(() => {
-                        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], span'));
-                        const target = buttons.find(b => {
-                            const t = b.innerText.toLowerCase();
-                            return t.includes("try another way") || t.includes("coba cara lain") || t.includes("more options");
-                        });
-                        if (target) {
-                            target.click();
-                            return true;
-                        }
-                        return false;
-                    });
-
-                    if (tryAnotherWayClicked) {
-                        logCallback("Clicked 'Try another way'. Waiting...");
-                        await new Promise(r => setTimeout(r, 3000));
-                        // Loop will continue and check again. 
-                        // If it goes to email/tap yes, we might pass. 
-                        // If it goes back to phone, the first check above will catch it next loop.
-                        continue;
-                    } else {
-                        // No bypass button found
-                        throw new Error("Account Blocked: Verification required (No bypass).");
-                    }
-                }
-
-                if (pageText.includes("couldn't sign you in") || pageText.includes("tidak dapat login")) {
-                    throw new Error("Account Blocked: Sign-in rejected.");
-                }
-            } catch (e) {
-                if (e.message.includes("Account Blocked")) throw e;
-            }
-            throw new Error("Auth Timeout: Could not capture token in time.");
+            throw new Error("Auth Timeout: Could not capture token via CDP.");
         }
-        await new Promise(r => setTimeout(r, 1000));
-        // Periodic probe
-        if ((Date.now() - startTime) % 5000 < 1000 && !authToken) {
+
+        // Active Reload Strategy if stuck
+        if (elapsed > 8000 && !authToken && !hasReloaded) {
+            logCallback("Login seems successful (or stuck), but no token yet. Forcing Reload...");
+            hasReloaded = true;
             try {
-                await page.evaluate(() => {
-                    fetch("https://appcatalyst.pa.googleapis.com/v1beta1/mobile_service:execute", {
-                        method: "POST",
-                        headers: { "content-type": "application/json" },
-                        body: JSON.stringify({ dummy: true })
-                    }).catch(() => { });
-                });
+                await page.goto("https://opal.google", { waitUntil: 'domcontentloaded' });
+            } catch (e) {
+                logCallback("Reload failed: " + e.message);
+            }
+        }
+
+        await new Promise(r => setTimeout(r, 1000));
+
+        // Periodic probe (keep this as backup) - just to force traffic
+        if (elapsed % 3000 < 500 && !authToken) {
+            try {
+                await page.evaluate(() => { window.scrollTo(0, Math.random() * 500); }).catch(() => { });
             } catch (e) { }
         }
     }

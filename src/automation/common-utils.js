@@ -26,28 +26,46 @@ function safeRemoveAccount(email, logCallback = console.log) {
 }
 
 // Clear existing value and type text quickly
-async function clearAndType(page, selector, text, timeout = 5000) {
-    // Special handling for password fields with retry
-    if (selector.includes('password') || selector.includes('Passwd')) {
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            try {
-                await page.waitForSelector(selector, { visible: true, timeout });
-                const el = await page.$(selector);
-                await page.waitForFunction(el => !el.disabled, {}, el);
-                await el.click({ clickCount: 3 });
-                await page.keyboard.press('Backspace');
-                await el.type(text, { delay: 0 });
-                return;
-            } catch (err) {
-                if (attempt === 2) throw err;
-            }
-        }
-    } else {
+// Clear existing value and type text quickly
+async function clearAndType(page, selector, text, timeout = 30000) {
+    try {
         await page.waitForSelector(selector, { visible: true, timeout });
         const el = await page.$(selector);
-        await el.click({ clickCount: 3 });
+
+        // Ensure element is enabled
+        await page.waitForFunction(el => !el.disabled, {}, el);
+
+        // 1. Focus
+        await el.focus();
+
+        // 2. Clear (Select all + Backspace is most reliable for React/Angular inputs)
+        await page.keyboard.down('Control');
+        await page.keyboard.press('A');
+        await page.keyboard.up('Control');
         await page.keyboard.press('Backspace');
-        await el.type(text, { delay: 0 });
+
+        // 3. Type
+        // For password, type slower
+        const isPassword = selector.includes('password') || selector.includes('Passwd');
+        const delay = isPassword ? 100 : 20;
+
+        await el.type(text, { delay });
+
+        // 4. Verification (Optional but good for stability)
+        // If it's a password field, we can't easily check value without evaluation, 
+        // but for email we can.
+        if (!isPassword) {
+            const val = await page.evaluate(e => e.value, el);
+            if (val !== text) {
+                // Fallback: Force value via JS if typing failed (less human but works)
+                // Only do this if normal typing failed
+                console.log(`[clearAndType] Mismatch detected. JS forcing value...`);
+                await page.evaluate((e, t) => { e.value = t; e.dispatchEvent(new Event('input', { bubbles: true })); }, el, text);
+            }
+        }
+    } catch (e) {
+        console.warn(`[clearAndType] Error interacting with ${selector}: ${e.message}`);
+        throw e;
     }
 }
 

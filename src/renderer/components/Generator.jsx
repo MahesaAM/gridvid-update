@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, memo } from 'react';
-import { Type, Image as ImageIcon, Play, Upload, FolderOpen, Save, Layers, Clock, Monitor, ChevronRight, Volume2, VolumeX, AlertCircle, CheckCircle2, X } from 'lucide-react';
+import { Type, Image as ImageIcon, Play, Upload, FolderOpen, Save, Layers, Clock, Monitor, ChevronRight, Volume2, VolumeX, AlertCircle, CheckCircle2, X, Copy, Check } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -275,6 +275,7 @@ const TextListItem = memo(({ text, index, status, timer }) => {
 // --- LOGS PANEL COMPONENT (ISOLATED) ---
 const LogsPanel = memo(({ type, title, color }) => {
     const [logs, setLogs] = useState([]);
+    const [isCopied, setIsCopied] = useState(false);
     const logsEndRef = useRef(null);
 
     useEffect(() => {
@@ -308,11 +309,28 @@ const LogsPanel = memo(({ type, title, color }) => {
         }
     }, [logs]);
 
+    const handleCopy = () => {
+        if (logs.length === 0) return;
+        const text = logs.map(l => `[${l.time}] ${l.message}`).join('\n');
+        navigator.clipboard.writeText(text);
+        setIsCopied(true);
+        setTimeout(() => setIsCopied(false), 2000);
+    };
+
     return (
         <div className="bg-slate-950 border-t border-white/10 h-full flex flex-col shrink-0 flex-1 min-h-0 border-r border-slate-900 last:border-r-0">
-            <div className={`px-3 py-1.5 flex items-center gap-2 border-b border-white/5 bg-slate-900/20`}>
-                <div className={`w-1.5 h-1.5 rounded-full ${color} animate-pulse`}></div>
-                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">{title}</span>
+            <div className={`px-3 py-1.5 flex items-center justify-between border-b border-white/5 bg-slate-900/20`}>
+                <div className="flex items-center gap-2">
+                    <div className={`w-1.5 h-1.5 rounded-full ${color} animate-pulse`}></div>
+                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">{title}</span>
+                </div>
+                <button
+                    onClick={handleCopy}
+                    className="text-slate-600 hover:text-slate-300 transition-colors"
+                    title="Copy Logs"
+                >
+                    {isCopied ? <Check size={10} className="text-emerald-500" /> : <Copy size={10} />}
+                </button>
             </div>
             <div className="flex-1 overflow-y-auto p-2 font-mono text-[9px] space-y-0.5 custom-scrollbar">
                 {logs.length === 0 && <div className="text-slate-700 italic px-2">Waiting for activity...</div>}
@@ -447,6 +465,11 @@ export default function Generator({ mode, isHeadless }) {
             return next;
         });
     };
+
+    // Memoize the derived prompts list to avoid splitting large strings on every render/keystroke
+    const promptLines = React.useMemo(() => {
+        return prompts.split('\n').filter(p => p.trim());
+    }, [prompts]);
 
     return (
         <div className="flex h-full select-none">
@@ -624,7 +647,7 @@ export default function Generator({ mode, isHeadless }) {
                     <div className="flex flex-col">
                         <span className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">Total</span>
                         <span className="text-lg font-bold text-slate-200 leading-none">
-                            {mode === 'image' ? images.length : prompts.split('\n').filter(p => p.trim()).length}
+                            {mode === 'image' ? images.length : promptLines.length}
                         </span>
                     </div>
                     <div className="h-6 w-px bg-white/5"></div>
@@ -671,8 +694,8 @@ export default function Generator({ mode, isHeadless }) {
                                     onPromptChange={imagePromptType === 'custom' ? handlePromptChange : null}
                                 />
                             ))
-                        ) : (mode === 'text' && prompts.split('\n').filter(p => p.trim()).length > 0) ? (
-                            prompts.split('\n').filter(p => p.trim()).map((p, idx) => (
+                        ) : (mode === 'text' && promptLines.length > 0) ? (
+                            promptLines.map((p, idx) => (
                                 <TextListItem
                                     key={idx}
                                     index={idx}

@@ -28,6 +28,59 @@ export default function App() {
     const [expirationDate, setExpirationDate] = useState(null);
     const [checkingUpdate, setCheckingUpdate] = useState(false);
 
+    const [showHeadlessControl, setShowHeadlessControl] = useState(false);
+
+    useEffect(() => {
+        const pressedKeys = new Set();
+
+        const handleKeyDown = (e) => {
+            // Robust check for input focus
+            const active = document.activeElement;
+            if (active && (
+                active.tagName === 'INPUT' ||
+                active.tagName === 'TEXTAREA' ||
+                active.isContentEditable
+            )) {
+                return;
+            }
+
+            pressedKeys.add(e.code);
+
+            // Check for Ctrl + Shift + M + H + S
+            // We use e.ctrlKey and e.shiftKey for modifiers as they are reliable
+            // We check pressedKeys/e.code for the letters to handle simultaneous press
+            const isM = pressedKeys.has('KeyM');
+            const isH = pressedKeys.has('KeyH');
+            const isS = pressedKeys.has('KeyS');
+
+            // Note used preventDefault on the final key to avoid blocking normal typing of single letters
+            if (e.ctrlKey && e.shiftKey && isM && isH && isS) {
+                if (!e.repeat) { // Prevent toggling repeatedly while holding
+                    console.log('Shortcut triggered: Ctrl+Shift+M+H+S');
+                    setShowHeadlessControl(prev => !prev);
+                }
+                e.preventDefault();
+            }
+        };
+
+        const handleKeyUp = (e) => {
+            pressedKeys.delete(e.code);
+        };
+
+        // Safety clear on focus loss
+        const handleBlur = () => pressedKeys.clear();
+
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup', handleKeyUp);
+        window.addEventListener('blur', handleBlur);
+
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('keyup', handleKeyUp);
+            window.removeEventListener('blur', handleBlur);
+        };
+    }, []);
+
     useEffect(() => {
         const validateSession = async () => {
             const storedUser = localStorage.getItem('gridvidUser');
@@ -174,7 +227,7 @@ export default function App() {
                     <div className="flex items-center gap-4">
                         {isAuthenticated && (
                             <>
-                                <label className="flex items-center gap-2 cursor-pointer group hidden">
+                                <label className={cn("flex items-center gap-2 cursor-pointer group transition-opacity duration-300", showHeadlessControl ? "opacity-100" : "opacity-0 pointer-events-none hidden")}>
                                     <span className={cn("text-[10px] font-medium transition-colors", isHeadless ? "text-blue-400" : "text-slate-500")}>
                                         Headless
                                     </span>

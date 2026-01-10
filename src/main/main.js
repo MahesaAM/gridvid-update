@@ -369,18 +369,40 @@ ipcMain.handle('get-profiles-size', async () => {
     return parseFloat((sizeBytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 });
 
-ipcMain.handle('delete-all-profiles', async () => {
+ipcMain.handle('delete-all-profiles', async (event) => {
+    // 1. Force stop automation if running
+    if (isAutomationRunning) {
+        console.log('[DeleteProfiles] Automation is running, stopping it first...');
+        stopGenerate();
+        isAutomationRunning = false;
+        if (mainWindow) {
+            mainWindow.webContents.send('automation-status', 'stopped');
+            mainWindow.webContents.send('log-update', 'Automation stopped for profile cleanup.');
+        }
+        // Give it a moment to cleanup
+        await new Promise(r => setTimeout(r, 1000));
+    }
+
     const root = getProfilesRoot();
     console.log(`[DeleteProfiles] Starting deletion of: ${root}`);
 
     // Helper to kill chrome/chromedriver processes that might lock files
     const killBrowsers = async () => {
         return new Promise((resolve) => {
+            // Only kill chromedriver first, killing chrome.exe globally is risky for user's browser
+            // But we need to kill the instances spawned by puppeteer.
+            // We'll try to kill chromedriver which should close its children.
             const cmd = process.platform === 'win32'
-                ? 'taskkill /F /IM chrome.exe /T & taskkill /F /IM chromedriver.exe /T'
-                : 'pkill -f "Chrome"';
+                ? 'taskkill /F /IM chromedriver.exe /T'
+                : 'pkill -f "chromedriver"';
+
             exec(cmd, (err) => {
-                // Ignore errors (e.g. process not found)
+                // If that's done, maybe try to kill chrome processes strictly associated with our app data?
+                // Too complex for now. If locks persist, we might need the nuclear option.
+                // Let's add the nuclear option back BUT only if deletion fails? 
+
+                // For now, let's just stick to chromedriver to avoid killing the App or User Browser.
+                // If the user complains about "files locked", we can advise manual close.
                 resolve();
             });
         });
@@ -398,7 +420,7 @@ ipcMain.handle('delete-all-profiles', async () => {
         while (attempts < maxAttempts) {
             try {
                 if (fs.existsSync(root)) {
-                    // Use specific simplified recursive delete that ignores EBUSY on non-critical files
+                    // Use specific simplified recursive delete
                     await fsPromises.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
                 }
                 console.log('[DeleteProfiles] Deletion successful.');
@@ -407,7 +429,6 @@ ipcMain.handle('delete-all-profiles', async () => {
                 console.warn(`[DeleteProfiles] Attempt ${attempts + 1} failed: ${err.message}`);
 
                 // If it's the last attempt, try a "best effort" cleanup
-                // We iterate subfolders and try to delete what we can, ignoring errors
                 if (attempts === maxAttempts - 1) {
                     console.log('[DeleteProfiles] Performing best-effort cleanup...');
                     try {
@@ -419,15 +440,12 @@ ipcMain.handle('delete-all-profiles', async () => {
                                 console.warn(`Skipping locked item: ${item}`);
                             }
                         }
-                        // If root still remains, that's fine, we cleared most data
                         return { success: true, warning: "Some files were locked but most data was cleared." };
-                    } catch (e) {
-                        // If readdir fails, we can't do much
-                    }
+                    } catch (e) { }
                 }
 
                 attempts++;
-                await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
+                await new Promise(r => setTimeout(r, 2000));
             }
         }
 
@@ -435,8 +453,7 @@ ipcMain.handle('delete-all-profiles', async () => {
 
     } catch (error) {
         console.error('[DeleteProfiles] Fatal error:', error);
-        // Return explicit error message for UI
-        return { success: false, error: `Could not delete profiles: ${error.message} (Is Chrome running?)` };
+        return { success: false, error: `Could not delete profiles: ${error.message} (Try restarting the app)` };
     }
 });
 

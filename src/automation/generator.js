@@ -63,6 +63,28 @@ class TokenPool {
     }
 }
 
+const STATE_FILE = path.join(app.getPath('userData'), 'generator_state.json');
+
+function loadState() {
+    try {
+        if (fs.existsSync(STATE_FILE)) {
+            return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        }
+    } catch (e) {
+        console.error('Failed to load state:', e);
+    }
+    return { lastAccountIndex: 0 };
+}
+
+function saveState(state) {
+    try {
+        const current = loadState();
+        fs.writeFileSync(STATE_FILE, JSON.stringify({ ...current, ...state }, null, 2));
+    } catch (e) {
+        console.error('Failed to save state:', e);
+    }
+}
+
 /**
  * TokenHarvester (Producer)
  * Logs into accounts sequentially and pushes tokens to the pool.
@@ -70,10 +92,31 @@ class TokenPool {
 async function runTokenHarvest(accounts, tokenPool, logCallback, muteAudio, headless) {
     logCallback({ key: 'auth', message: 'Starting Token Harvester...' });
 
-    for (const account of accounts) {
+    // Load last used index
+    let state = loadState();
+    let startIndex = state.lastAccountIndex || 0;
+
+    // Validate index (if accounts list changed/shortened)
+    if (startIndex >= accounts.length) {
+        startIndex = 0;
+        saveState({ lastAccountIndex: 0 });
+        logCallback({ key: 'auth', message: 'Account list changed, resetting rotation index to 0.' });
+    }
+
+    logCallback({ key: 'auth', message: `Resuming account rotation from index ${startIndex} (${accounts[startIndex].email})` });
+
+    // Loop through all accounts, starting from startIndex, wrapping around
+    for (let i = 0; i < accounts.length; i++) {
         if (isStopped) break;
 
+        const currentIndex = (startIndex + i) % accounts.length;
+        const account = accounts[currentIndex];
+
         logCallback({ key: 'auth', message: `[${account.email}] Harvesting token...` });
+
+        // Update state to next index immediately so if we stop/crash, we start from next one
+        const nextIndex = (currentIndex + 1) % accounts.length;
+        saveState({ lastAccountIndex: nextIndex });
 
         // TODO: Check if we already have a valid token in memory? 
         // For now, let's assume we need to check login state or refresh.
